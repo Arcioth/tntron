@@ -1,0 +1,11 @@
+{
+  "id": "tunotron.equalizer",
+  "name": "10-Band Studio Equalizer",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "10-band studio graphic EQ with real mpv audio filter stages and coloration presets.",
+  "author": "Tunotron + tntron",
+  "main": "main.lua",
+  "permissions": ["audio:dsp", "ui:sidebar", "ui:settings", "storage", "notify"],
+  "requires": []
+}

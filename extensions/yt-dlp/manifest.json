@@ -1,0 +1,11 @@
+{
+  "id": "openify.yt-dlp",
+  "name": "YouTube Music (yt-dlp)",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Search YouTube, stream audio live via mpv, or download opus audio directly into your active music folder via yt-dlp.",
+  "author": "Openify + Tunotron",
+  "main": "main.lua",
+  "permissions": ["network", "library:read", "fs:write", "playback:control", "queue:control", "ui:sidebar", "storage", "notify"],
+  "requires": []
+}

@@ -1,0 +1,11 @@
+{
+  "id": "tunotron.better-player",
+  "name": "Better Player Controls",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Precision playback speed (0.50x - 2.00x), quick mute, and speed badge in the player bar.",
+  "author": "Tunotron + tntron",
+  "main": "main.lua",
+  "permissions": ["playback:read", "playback:control", "ui:settings", "ui:player_widget", "storage", "notify"],
+  "requires": []
+}

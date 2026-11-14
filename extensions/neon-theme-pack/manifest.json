@@ -1,0 +1,11 @@
+{
+  "id": "openify.neon-theme-pack",
+  "name": "Neon Theme Pack",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Adds Neon Pink, Neon Cyan, Twin, and Vegza high-contrast neon themes from Openify.",
+  "author": "Openify + tntron",
+  "main": "main.lua",
+  "permissions": ["themes:register"],
+  "requires": []
+}

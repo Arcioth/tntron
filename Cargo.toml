@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tntron-core",
+    "crates/tntron-gui",
+    "crates/tntron-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Arcioth"]
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "io-util", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+lofty = "0.21"
+mlua = { version = "0.10", features = ["lua54", "vendored", "send", "serialize"] }
+libc = "0.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2

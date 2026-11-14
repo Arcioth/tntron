@@ -1,0 +1,11 @@
+{
+  "id": "tunotron.track-announcer",
+  "name": "Track Announcer & Inspector",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Inspects active track metadata (codec, duration, album, path) and logs playback transitions.",
+  "author": "Tunotron + tntron",
+  "main": "main.lua",
+  "permissions": ["playback:read", "ui:sidebar", "storage", "notify"],
+  "requires": []
+}

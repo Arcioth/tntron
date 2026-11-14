@@ -1,0 +1,11 @@
+{
+  "id": "openify.better-visualizer",
+  "name": "Better Visualizer",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Adds animated Flame, Snow, Runner, Boulder, and Bicycle motion modes plus mini player-bar waveform.",
+  "author": "Openify + tntron",
+  "main": "main.lua",
+  "permissions": ["playback:read", "ui:sidebar", "ui:player_widget", "storage"],
+  "requires": ["openify.visualizer"]
+}

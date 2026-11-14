@@ -1,0 +1,11 @@
+{
+  "id": "tntron.better-themes",
+  "name": "Better Themes",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Adds Catppuccin, Nord, Dracula, Gruvbox, Tokyo Night, and Monokai developer palettes plus an interactive theme picker in Settings.",
+  "author": "Tunotron + tntron",
+  "main": "main.lua",
+  "permissions": ["themes:register", "ui:settings", "storage", "notify"],
+  "requires": []
+}

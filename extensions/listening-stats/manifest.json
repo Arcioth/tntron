@@ -1,0 +1,11 @@
+{
+  "id": "tunotron.listening-stats",
+  "name": "Listening Stats & Analytics",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Tracks cumulative listening time, per-track play counts, and top tracks leaderboard across sessions.",
+  "author": "Tunotron + tntron",
+  "main": "main.lua",
+  "permissions": ["playback:read", "library:read", "ui:sidebar", "storage", "notify"],
+  "requires": []
+}

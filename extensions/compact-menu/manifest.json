@@ -1,0 +1,11 @@
+{
+  "id": "openify.compact-menu",
+  "name": "Compact Menu",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Replaces the tall sidebar navigation list with a space-saving compact icon-button grid.",
+  "author": "Openify + tntron",
+  "main": "main.lua",
+  "permissions": ["ui:sidebar", "ui:settings", "ui:topbar", "storage", "notify"],
+  "requires": []
+}

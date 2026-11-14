@@ -1,0 +1,11 @@
+{
+  "id": "openify.theme-festival",
+  "name": "Theme Festival",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Adds 9 curated palettes from Openify: Sakura, Ocean Deep, Retrowave, Forest, Sunset Beach, Lavender Dream, Volcano, Arctic, and Candy Pop.",
+  "author": "Openify + tntron",
+  "main": "main.lua",
+  "permissions": ["themes:register"],
+  "requires": []
+}

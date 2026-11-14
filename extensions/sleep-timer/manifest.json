@@ -1,0 +1,11 @@
+{
+  "id": "tunotron.sleep-timer",
+  "name": "Sleep Timer",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Configurable countdown timer with optional volume fade-out, topbar countdown badge, and desktop notification.",
+  "author": "Tunotron + tntron",
+  "main": "main.lua",
+  "permissions": ["playback:read", "playback:control", "ui:topbar", "ui:settings", "notify", "storage"],
+  "requires": []
+}

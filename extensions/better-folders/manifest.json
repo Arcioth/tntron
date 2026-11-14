@@ -1,0 +1,11 @@
+{
+  "id": "openify.better-folders",
+  "name": "Better Folders & Audit",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Jailed folder creation, track breakdown per directory, duplicate basename auditing, and library rescan.",
+  "author": "Openify + Tunotron",
+  "main": "main.lua",
+  "permissions": ["library:read", "playback:read", "playback:control", "fs:write", "ui:sidebar", "storage", "notify"],
+  "requires": []
+}

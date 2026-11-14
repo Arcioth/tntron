@@ -1,0 +1,11 @@
+{
+  "id": "tunotron.better-notifications",
+  "name": "Notification History Tray",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Logs track and playback alerts into a persistent Notification Tray with unread topbar count.",
+  "author": "Tunotron + tntron",
+  "main": "main.lua",
+  "permissions": ["playback:read", "notify", "ui:sidebar", "ui:topbar", "storage"],
+  "requires": []
+}

@@ -1,0 +1,11 @@
+{
+  "id": "openify.better-topbar",
+  "name": "Better Topbar Telemetry",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Displays live audio codec fidelity, loaded track count, and active playback status in the top bar.",
+  "author": "Openify + Tunotron",
+  "main": "main.lua",
+  "permissions": ["playback:read", "library:read", "ui:topbar", "ui:settings", "storage"],
+  "requires": []
+}

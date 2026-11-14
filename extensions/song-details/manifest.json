@@ -1,0 +1,11 @@
+{
+  "id": "openify.song-details",
+  "name": "Song Details & Bindings",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Displays live BPM, beat interval, energy, peak dB, codec telemetry, tap tempo, and binds BPM/beats directly to 8D Spatial Orbit & Daeboard RGB keyboard.",
+  "author": "tntron",
+  "main": "main.lua",
+  "permissions": ["playback:read", "audio:dsp", "hw:control", "ui:sidebar", "ui:player_widget", "storage", "notify"],
+  "requires": []
+}

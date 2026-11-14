@@ -1,0 +1,11 @@
+{
+  "id": "tunotron.section-loop",
+  "name": "A-B Section Looper",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Precision A-B marker looping with per-track memory and instant repeat seek.",
+  "author": "Tunotron + tntron",
+  "main": "main.lua",
+  "permissions": ["playback:read", "playback:control", "ui:sidebar", "ui:player_widget", "storage", "notify"],
+  "requires": []
+}

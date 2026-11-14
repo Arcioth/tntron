@@ -1,0 +1,11 @@
+{
+  "id": "tunotron.better-speed",
+  "name": "Better Speed & Pitch Studio",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Musicolet-style precision tempo (0.25x-3.00x at 0.01x step) & independent pitch shift (-12..+12 semitones via Rubberband), speed-pitch vinyl linking, formant preservation, and Nightcore/Slowed+Reverb presets.",
+  "author": "tntron",
+  "main": "main.lua",
+  "permissions": ["playback:control", "audio:dsp", "ui:sidebar", "ui:player_widget", "storage", "notify"],
+  "requires": []
+}

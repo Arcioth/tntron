@@ -1,0 +1,11 @@
+{
+  "id": "tunotron.now-playing-notify",
+  "name": "Now Playing & Desktop Notifier",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Dispatches desktop alerts on track change and shows a detailed Now Playing sidebar card with per-track play counts.",
+  "author": "Openify + Tunotron",
+  "main": "main.lua",
+  "permissions": ["playback:read", "library:read", "notify", "ui:sidebar", "storage"],
+  "requires": []
+}

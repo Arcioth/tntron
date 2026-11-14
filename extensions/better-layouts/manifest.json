@@ -1,0 +1,11 @@
+{
+  "id": "openify.better-layouts",
+  "name": "Better Layouts & Density",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Controls track row density (Compact / Normal / Large) and HUD compactness across Openify layouts.",
+  "author": "Openify + Tunotron",
+  "main": "main.lua",
+  "permissions": ["ui:settings", "ui:topbar", "storage", "notify"],
+  "requires": []
+}

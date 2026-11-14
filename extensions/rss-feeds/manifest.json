@@ -1,0 +1,11 @@
+{
+  "id": "tunotron.rss-feeds",
+  "name": "Podcast & RSS Audio Feeds",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Subscribe to podcast RSS feeds, parse audio enclosures asynchronously, and stream or queue episodes directly via mpv.",
+  "author": "Tunotron + tntron",
+  "main": "main.lua",
+  "permissions": ["network", "playback:control", "queue:control", "ui:sidebar", "ui:topbar", "storage", "notify"],
+  "requires": []
+}

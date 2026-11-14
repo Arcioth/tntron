@@ -1,0 +1,11 @@
+{
+  "id": "tunotron.spatial-audio",
+  "name": "3D / 8D Spatial Audio",
+  "version": "1.1.0",
+  "api_version": "1.0",
+  "description": "Precision 8D/7D/Spiral revolving soundstage with fine 0.01Hz orbit speed, LFO shapes, orbit depth, stereo width & hall ambience.",
+  "author": "Tunotron + tntron",
+  "main": "main.lua",
+  "permissions": ["audio:dsp", "playback:read", "ui:sidebar", "ui:player_widget", "storage", "notify"],
+  "requires": []
+}

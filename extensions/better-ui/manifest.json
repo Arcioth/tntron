@@ -1,0 +1,11 @@
+{
+  "id": "openify.better-ui",
+  "name": "Better UI",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Adds compact track telemetry pill inside the player bar and UI polish status controls in Settings.",
+  "author": "Openify + tntron",
+  "main": "main.lua",
+  "permissions": ["playback:read", "ui:settings", "ui:player_widget", "storage"],
+  "requires": []
+}

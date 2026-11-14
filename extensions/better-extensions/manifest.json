@@ -1,0 +1,11 @@
+{
+  "id": "openify.better-extensions",
+  "name": "Better Extensions",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Bulk enable/disable extension controls and quick manager utilities (Openify better-extensions).",
+  "author": "Openify + tntron",
+  "main": "main.lua",
+  "permissions": ["ui:settings", "notify"],
+  "requires": []
+}

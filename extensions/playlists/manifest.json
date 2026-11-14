@@ -1,0 +1,11 @@
+{
+  "id": "tunotron.playlists",
+  "name": "Playlists (Folders)",
+  "version": "2.0.0",
+  "api_version": "1.0",
+  "description": "Manage music folders directly as playlists: create/delete playlist folders, add the active track to a playlist folder, or remove tracks.",
+  "author": "Openify + Tunotron",
+  "main": "main.lua",
+  "permissions": ["playback:read", "playback:control", "queue:control", "library:read", "fs:write", "ui:sidebar", "storage", "notify"],
+  "requires": []
+}

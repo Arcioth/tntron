@@ -1,0 +1,11 @@
+{
+  "id": "openify.lyrics",
+  "name": "Lyrics",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Reads local .lrc files and fetches synced/plain lyrics from LRCLIB with click-to-seek lines.",
+  "author": "Openify + tntron",
+  "main": "main.lua",
+  "permissions": ["playback:read", "playback:control", "library:read", "network", "ui:sidebar", "storage"],
+  "requires": []
+}

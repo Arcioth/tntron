@@ -1,0 +1,11 @@
+{
+  "id": "openify.daetron-daeboard",
+  "name": "Daetron & Daeboard Link",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Connects tntron to daeboard (/run/daeboard/daeboard.sock) for music-reactive ASUS TUF keyboard RGB lighting and daetron rule reload/telemetry.",
+  "author": "tntron",
+  "main": "main.lua",
+  "permissions": ["hw:control", "playback:read", "ui:sidebar", "ui:topbar", "storage", "notify"],
+  "requires": []
+}

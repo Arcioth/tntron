@@ -1,0 +1,11 @@
+{
+  "id": "openify.visualizer",
+  "name": "Visualizer",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Real-time Unicode block & Braille spectrum visualizer with Bars, Waveform, Mirror, and Braille modes.",
+  "author": "Openify + Tunotron",
+  "main": "main.lua",
+  "permissions": ["playback:read", "ui:sidebar", "ui:topbar", "storage"],
+  "requires": []
+}
