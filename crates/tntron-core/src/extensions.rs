@@ -926,6 +926,7 @@ Place each extension in its own folder inside `~/.config/tntron/extensions/<ext-
                 | ExtHostCommand::UiSetIconConfig { .. }
                 | ExtHostCommand::UiSetButtonConfig { .. }
                 | ExtHostCommand::UiSetLogoConfig { .. }
+                | ExtHostCommand::UiSetDiscordRpcConfig { .. }
                 | ExtHostCommand::UiSetTransparencyConfig { .. }
                 | ExtHostCommand::UiSetPopupConfig { .. }
                 | ExtHostCommand::UiCopyClipboard { .. }
@@ -2057,6 +2058,25 @@ fn bind_ui_sdk(lua: &Lua, ui: &Table, bridge: &SharedBridge) -> mlua::Result<()>
                 }
                 let patch: serde_json::Value = lua.from_value(patch_tbl)?;
                 b.pending_cmds.push(ExtHostCommand::UiSetLogoConfig { patch });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        ui.set(
+            "set_discord_rpc_config",
+            lua.create_function(move |lua, patch_tbl: LuaValue| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                if !(b.has_perm("ui:settings") || b.has_perm("ui:sidebar")) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "Extension '{}' lacks permission 'ui:settings'",
+                        b.ext_id
+                    )));
+                }
+                let patch: serde_json::Value = lua.from_value(patch_tbl)?;
+                b.pending_cmds
+                    .push(ExtHostCommand::UiSetDiscordRpcConfig { patch });
                 Ok(())
             })?,
         )?;

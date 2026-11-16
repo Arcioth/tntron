@@ -402,6 +402,9 @@ pub enum ExtHostCommand {
     UiSetLogoConfig {
         patch: serde_json::Value,
     },
+    UiSetDiscordRpcConfig {
+        patch: serde_json::Value,
+    },
     UiSetTransparencyConfig {
         patch: serde_json::Value,
     },

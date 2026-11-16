@@ -235,6 +235,7 @@ pub enum Message {
     ReconnectDiscordRpc,
     ResetDiscordRpc,
     FontLoaded(Result<(), iced::font::Error>),
+    Noop,
     ToggleProfilePopover,
     CloseProfilePopover,
     ProfileNameDraftChanged(String),
@@ -1655,6 +1656,7 @@ impl TntronApp {
                     tracing::warn!("Failed loading imported icon font: {err:?}");
                 }
             }
+            Message::Noop => {}
             Message::ToggleFullscreen => {
                 self.is_fullscreen = !self.is_fullscreen;
                 let mode = if self.is_fullscreen {
@@ -4962,15 +4964,7 @@ impl TntronApp {
                 ..Default::default()
             });
 
-        Some(
-            container(card)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .padding(pad4(58.0, 26.0, 0.0, 0.0))
-                .align_x(Alignment::End)
-                .align_y(Vertical::Top)
-                .into(),
-        )
+        Some(wrap_dismiss_popover(card.into(), Message::CloseAlertsPopover))
     }
 
     fn render_avatar_widget<'a>(
@@ -5256,15 +5250,7 @@ impl TntronApp {
                 ..Default::default()
             });
 
-        Some(
-            container(card)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .padding(pad4(58.0, 26.0, 0.0, 0.0))
-                .align_x(Alignment::End)
-                .align_y(Vertical::Top)
-                .into(),
-        )
+        Some(wrap_dismiss_popover(card.into(), Message::CloseProfilePopover))
     }
 
     fn view_toast_overlay<'a>(
@@ -5389,6 +5375,25 @@ fn overlays_for_ext_tab<'a>(
 /// Loads `.png`/`.jpg`/`.webp`, `.jxl` (via `djxl`/`magick`), and `.svg` (via `magick`/`rsvg-convert`) into `image::Handle`.
 fn is_ui_hidden(snap: &UiSnapshot) -> bool {
     snap.layout.hide_ui || (snap.transparency.enabled && snap.transparency.hide_ui)
+}
+
+fn wrap_dismiss_popover<'a>(
+    card: Element<'a, Message>,
+    on_dismiss: Message,
+) -> Element<'a, Message> {
+    let backdrop = mouse_area(container(text("")).width(Length::Fill).height(Length::Fill))
+        .on_press(on_dismiss.clone())
+        .on_right_press(on_dismiss);
+    let inner = mouse_area(card)
+        .on_press(Message::Noop)
+        .on_right_press(Message::Noop);
+    let positioned = container(inner)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(pad4(58.0, 26.0, 0.0, 0.0))
+        .align_x(Alignment::End)
+        .align_y(Vertical::Top);
+    stack([backdrop.into(), positioned.into()]).into()
 }
 
 fn decode_any_image_handle(raw: &str) -> Option<image::Handle> {

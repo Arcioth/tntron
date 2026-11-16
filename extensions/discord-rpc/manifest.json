@@ -1,0 +1,11 @@
+{
+  "id": "tntron.discord-rpc",
+  "name": "Discord Rich Presence",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Broadcasts customizable real-time track, artist, album, codec, BPM, speed/pitch, timestamps, privacy mode, and button details to Discord/Vesktop.",
+  "author": "tntron",
+  "main": "main.lua",
+  "permissions": ["playback:read", "ui:sidebar", "ui:settings", "storage", "notify"],
+  "requires": []
+}

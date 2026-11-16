@@ -1149,6 +1149,11 @@ impl CoreState {
                     apply_logo_patch(&mut self.persisted.logo, &patch);
                     self.dirty_persist = true;
                 }
+                ExtHostCommand::UiSetDiscordRpcConfig { patch } => {
+                    apply_discord_rpc_patch(&mut self.persisted.discord_rpc, &patch);
+                    self.sync_discord_rpc();
+                    self.dirty_persist = true;
+                }
                 ExtHostCommand::UiCopyClipboard { text } => {
                     fx.clipboard_copy = Some(text);
                 }
@@ -3347,6 +3352,19 @@ fn apply_logo_patch(cfg: &mut LogoConfig, patch: &serde_json::Value) {
     }
     if let Some(b) = patch.get("beat_pulse").and_then(|v| v.as_bool()) {
         cfg.beat_pulse = b;
+    }
+}
+
+fn apply_discord_rpc_patch(cfg: &mut DiscordRpcConfig, patch: &serde_json::Value) {
+    if let Ok(mut base) = serde_json::to_value(&*cfg) {
+        if let (Some(dst), Some(src)) = (base.as_object_mut(), patch.as_object()) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
+            if let Ok(updated) = serde_json::from_value::<DiscordRpcConfig>(base) {
+                *cfg = updated;
+            }
+        }
     }
 }
 

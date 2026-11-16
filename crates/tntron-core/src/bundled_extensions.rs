@@ -33,6 +33,7 @@ pub const BUNDLED_EXTENSIONS: &[BundledExtension] = &[
     ext!("button-packs"),
     ext!("compact-menu"),
     ext!("daetron-daeboard"),
+    ext!("discord-rpc"),
     ext!("equalizer"),
     ext!("icon-packs"),
     ext!("listening-stats"),
