@@ -641,7 +641,7 @@ impl Default for DiscordRpcConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            client_id: String::new(),
+            client_id: "1572028761224904806".to_string(),
             activity_type: 2,
             show_title: true,
             show_artist: true,

@@ -13,6 +13,7 @@ use crate::storage::DiscordRpcConfig;
 
 const OP_HANDSHAKE: u32 = 0;
 const OP_FRAME: u32 = 1;
+pub const DEFAULT_DISCORD_CLIENT_ID: &str = "1572028761224904806";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiscordPlaybackState {
@@ -655,13 +656,12 @@ async fn read_ipc_frame(stream: &mut UnixStream) -> std::io::Result<(u32, Vec<u8
 }
 
 async fn connect_discord(client_id: &str) -> Result<(UnixStream, String), String> {
-    let cid = client_id.trim();
-    if cid.is_empty() || cid == "1306739184569253928" {
-        return Err(
-            "Set your Discord Application ID (from discord.com/developers/applications) and click Apply"
-                .to_string(),
-        );
-    }
+    let raw = client_id.trim();
+    let cid = if raw.is_empty() || raw == "1306739184569253928" {
+        DEFAULT_DISCORD_CLIENT_ID
+    } else {
+        raw
+    };
 
     let candidates = candidate_socket_paths();
     if candidates.is_empty() {

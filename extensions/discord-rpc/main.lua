@@ -2,7 +2,7 @@
 
 local DEFAULTS = {
     enabled = true,
-    client_id = "",
+    client_id = "1572028761224904806",
     activity_type = 2,
     show_title = true,
     show_artist = true,
@@ -88,7 +88,7 @@ local function render()
             tntron.ui.toggle("show_button",       "Action Button", st.cfg.show_button),
         }),
         tntron.ui.input("client_id", "Discord App Client ID", st.cfg.client_id, {
-            placeholder = "Paste Application ID from discord.com/developers/applications",
+            placeholder = "1572028761224904806",
             submit_action = "set_client_id",
             submit_label = "Apply",
         }),

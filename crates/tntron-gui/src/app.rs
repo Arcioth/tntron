@@ -593,11 +593,11 @@ impl TntronApp {
                 text("Placeholders for custom templates: {title} {artist} {album} {codec} {bpm} {speed} {pitch} {queue} {loop} {shuffle} {state}")
                     .size(11)
                     .color(theme.muted),
-                text("Setup: 1) discord.com/developers/applications -> New Application ('tntron')  2) Paste Application ID below & click Apply  3) Enable 'Activity Privacy -> Display current activity' in Discord.")
+                text("Setup: Built-in Client App ID 1572028761224904806 works out of the box (custom ID optional via discord.com/developers/applications). Ensure Discord's 'Activity Privacy -> Display current activity' is ON.")
                     .size(11)
                     .color(theme.accent),
                 column![
-                    field_input("Client App ID", "client_id", &self.discord_client_id_draft, "Paste Application ID from discord.com/developers/applications"),
+                    field_input("Client App ID", "client_id", &self.discord_client_id_draft, "1572028761224904806"),
                     field_input("Custom Details", "custom_details", &self.discord_details_draft, "{title} · {bpm}"),
                     field_input("Custom State", "custom_state", &self.discord_state_draft, "{artist} · {album} · {codec}"),
                     field_input("Idle Text", "idle_text", &self.discord_idle_draft, "Browsing library · Idle"),
