@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 16" width="216" height="192">
+  <g fill="#FFFFFF">
+    <!-- Scattered dissolving pixels on the far left -->
+    <rect x="1" y="3" width="1" height="1" fill-opacity="0.2" />
+    <rect x="2" y="6" width="1" height="1" fill-opacity="0.3" />
+    <rect x="1" y="10" width="1" height="1" fill-opacity="0.2" />
+    <rect x="2" y="13" width="1" height="1" fill-opacity="0.25" />
+    
+    <rect x="3" y="2" width="1" height="1" fill-opacity="0.35" />
+    <rect x="3" y="5" width="1" height="1" fill-opacity="0.4" />
+    <rect x="3" y="8" width="1" height="1" fill-opacity="0.3" />
+    <rect x="3" y="11" width="1" height="1" fill-opacity="0.4" />
+    <rect x="3" y="14" width="1" height="1" fill-opacity="0.3" />
+
+    <!-- Column 1 (Left edge of the triangle - heavily faded) -->
+    <rect x="4" y="1" width="1" height="1" fill-opacity="0.45" />
+    <rect x="4" y="3" width="1" height="1" fill-opacity="0.55" />
+    <rect x="4" y="4" width="1" height="1" fill-opacity="0.5" />
+    <rect x="4" y="6" width="1" height="1" fill-opacity="0.6" />
+    <rect x="4" y="7" width="1" height="1" fill-opacity="0.45" />
+    <rect x="4" y="9" width="1" height="1" fill-opacity="0.55" />
+    <rect x="4" y="10" width="1" height="1" fill-opacity="0.6" />
+    <rect x="4" y="12" width="1" height="1" fill-opacity="0.5" />
+    <rect x="4" y="14" width="1" height="1" fill-opacity="0.45" />
+
+    <!-- Column 2 (Medium fade) -->
+    <rect x="5" y="1" width="1" height="1" fill-opacity="0.7" />
+    <rect x="5" y="2" width="1" height="1" fill-opacity="0.8" />
+    <rect x="5" y="3" width="1" height="1" fill-opacity="0.75" />
+    <rect x="5" y="4" width="1" height="1" fill-opacity="0.85" />
+    <rect x="5" y="5" width="1" height="1" fill-opacity="0.7" />
+    <rect x="5" y="6" width="1" height="1" fill-opacity="0.8" />
+    <rect x="5" y="7" width="1" height="1" fill-opacity="0.85" />
+    <rect x="5" y="8" width="1" height="1" fill-opacity="0.7" />
+    <rect x="5" y="9" width="1" height="1" fill-opacity="0.8" />
+    <rect x="5" y="10" width="1" height="1" fill-opacity="0.75" />
+    <rect x="5" y="11" width="1" height="1" fill-opacity="0.85" />
+    <rect x="5" y="12" width="1" height="1" fill-opacity="0.75" />
+    <rect x="5" y="13" width="1" height="1" fill-opacity="0.8" />
+    <rect x="5" y="14" width="1" height="1" fill-opacity="0.7" />
+
+    <!-- Column 3 (Slight fade) -->
+    <rect x="6" y="2" width="1" height="12" fill-opacity="0.92" />
+
+    <!-- Solid Triangle Body (Columns 4 to 13) -->
+    <rect x="7" y="2" width="1" height="12" />
+    <rect x="8" y="3" width="1" height="10" />
+    <rect x="9" y="3" width="1" height="10" />
+    <rect x="10" y="4" width="1" height="8" />
+    <rect x="11" y="4" width="1" height="8" />
+    <rect x="12" y="5" width="1" height="6" />
+    <rect x="13" y="5" width="1" height="6" />
+    <rect x="14" y="6" width="1" height="4" />
+    <rect x="15" y="6" width="1" height="4" />
+    <rect x="16" y="7" width="1" height="2" />
+  </g>
+</svg>

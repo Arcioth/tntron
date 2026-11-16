@@ -11,6 +11,8 @@ pub use browser::{
     read_directory, rename_in_jail, resolve_in_jail, scan_all_tracks_in_jail, BrowserEntry,
 };
 pub use cache::LruCache;
-pub use lrc::{active_lyric_index, load_companion_lrc, parse_lrc, LyricLine};
+pub use lrc::{
+    active_lyric_index, load_companion_lrc, parse_lrc, plain_text_to_timed_lines, LyricLine,
+};
 pub use scanner::{MetadataPatch, Scanner};
 pub use track::{format_mmss, Track, TrackId};

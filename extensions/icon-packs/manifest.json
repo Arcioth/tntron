@@ -1,0 +1,11 @@
+{
+  "id": "tntron.icon-packs",
+  "name": "Icon Packs & Studio",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Switch between Nerd, Material, Octicons, Codicons, Minimal, and ASCII icon packs, adjust size & custom color tint, and override any individual icon slot.",
+  "author": "tntron",
+  "main": "main.lua",
+  "permissions": ["ui:sidebar", "storage", "notify"],
+  "requires": []
+}

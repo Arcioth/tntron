@@ -1,5 +1,19 @@
 { pkgs ? import <nixpkgs> {} }:
 
+let
+  runtimeLibs = with pkgs; [
+    wayland
+    libxkbcommon
+    vulkan-loader
+    libGL
+    fontconfig
+    freetype
+    libx11
+    libxcursor
+    libxi
+    libxrandr
+  ];
+in
 pkgs.mkShell {
   name = "tntron-dev";
 
@@ -13,31 +27,13 @@ pkgs.mkShell {
 
   buildInputs = with pkgs; [
     mpv
-    wayland
-    libxkbcommon
-    vulkan-loader
-    libGL
-    fontconfig
-    freetype
-    libx11
-    libxcursor
-    libxi
-    libxrandr
-  ];
+    libjxl
+    imagemagick
+    yt-dlp
+  ] ++ runtimeLibs;
 
   shellHook = ''
-    export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath (with pkgs; [
-      wayland
-      libxkbcommon
-      vulkan-loader
-      libGL
-      fontconfig
-      freetype
-      libx11
-      libxcursor
-      libxi
-      libxrandr
-    ])}:$LD_LIBRARY_PATH"
-    echo "🎵 Welcome to tntron (Rust + iced GUI) development environment!"
+    export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath runtimeLibs}:$LD_LIBRARY_PATH"
+    echo "tntron dev environment ready (Rust + iced + mpv + djxl + imagemagick)"
   '';
 }

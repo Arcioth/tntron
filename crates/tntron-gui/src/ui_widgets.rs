@@ -1,14 +1,23 @@
 use iced::widget::{
-    button, column, container, image, progress_bar, row, slider, space, text, text_input,
+    button, column, container, image, progress_bar, row, slider, space, stack, text, text_input,
     tooltip, Column, Container, Row,
 };
-use iced::{Alignment, Background, Border, Color, Element, Length, Shadow, Theme, Vector};
+use iced::{Alignment, Background, Border, Color, ContentFit, Element, Length, Shadow, Theme, Vector};
 use std::collections::HashMap;
 use tntron_core::ExtWidget;
 
-use crate::icons::{self, resolve_icon, ICON_FONT};
+use crate::button_style::{compute_button_style, wrap_chrome, ButtonKind};
+use crate::gif_viz::GifVizView;
+use crate::icons::{self, resolve_icon};
 use crate::theme::ThemeSpec;
 use crate::visualizer::{visualizer_canvas, VizFrameData};
+
+#[derive(Clone)]
+pub struct ExtVizCtx<'a, Message: Clone> {
+    pub frame: VizFrameData,
+    pub gif: GifVizView<'a>,
+    pub on_next_gif: Message,
+}
 
 pub fn openify_panel<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
@@ -59,35 +68,30 @@ pub fn slot_badge<'a, Message: Clone + 'a>(
 
     let inner: Element<'a, Message> = if let Some(iname) = icon_name {
         row![
-            text(resolve_icon(iname)).font(ICON_FONT).size(11).color(fg),
-            text(label).size(11).color(fg),
+            icons::icon(resolve_icon(iname), 11.0, fg),
+            text(label)
+                .size(11)
+                .color(fg)
+                .wrapping(iced::widget::text::Wrapping::None),
         ]
         .spacing(6)
         .align_y(Alignment::Center)
         .into()
     } else {
-        text(label).size(11).color(fg).into()
+        text(label)
+            .size(11)
+            .color(fg)
+            .wrapping(iced::widget::text::Wrapping::None)
+            .into()
     };
 
     if let Some(msg) = on_press {
-        button(inner)
-            .padding([4, 10])
+        let th = theme.clone();
+        button(wrap_chrome(inner, [4, 10], ButtonKind::Pill, &th, th.surface))
+            .padding(0)
             .style(move |_: &Theme, status| {
-                let hover = matches!(status, button::Status::Hovered);
-                button::Style {
-                    background: Some(Background::Color(if hover && !accent {
-                        hover_bg
-                    } else {
-                        bg
-                    })),
-                    text_color: fg,
-                    border: Border {
-                        color: border,
-                        width: 1.0,
-                        radius: 20.0.into(),
-                    },
-                    ..Default::default()
-                }
+                let hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                compute_button_style(ButtonKind::Pill, accent, hover, bg, hover_bg, fg, border, 20.0, &th)
             })
             .on_press(msg)
             .into()
@@ -133,7 +137,7 @@ pub fn pill_icon_button<'a, Message: Clone + 'a>(
 
     let content: Element<'a, Message> = if let Some(g) = icon_glyph {
         row![
-            text(g).font(ICON_FONT).size(12).color(fg),
+            icons::icon(g, 12.0, fg),
             text(label).size(12).color(fg),
         ]
         .spacing(6)
@@ -143,26 +147,22 @@ pub fn pill_icon_button<'a, Message: Clone + 'a>(
         text(label).size(12).color(fg).into()
     };
 
-    button(content)
-        .padding([6, 14])
+    let th = theme.clone();
+    button(wrap_chrome(content, [6, 14], ButtonKind::Pill, &th, th.surface))
+        .padding(0)
         .style(move |_: &Theme, status| {
-            let is_hover = matches!(status, button::Status::Hovered);
-            button::Style {
-                background: Some(Background::Color(if active {
-                    accent
-                } else if is_hover {
-                    hover_bg
-                } else {
-                    card
-                })),
-                text_color: fg,
-                border: Border {
-                    color: if active { accent } else { border },
-                    width: 1.0,
-                    radius: 20.0.into(),
-                },
-                ..Default::default()
-            }
+            let is_hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            compute_button_style(
+                ButtonKind::Pill,
+                active,
+                is_hover,
+                card,
+                hover_bg,
+                fg,
+                if active { accent } else { border },
+                20.0,
+                &th,
+            )
         })
         .on_press(msg)
         .into()
@@ -179,7 +179,7 @@ pub fn primary_pill_icon_button<'a, Message: Clone + 'a>(
 
     let content: Element<'a, Message> = if let Some(g) = icon_glyph {
         row![
-            text(g).font(ICON_FONT).size(12).color(accent_fg),
+            icons::icon(g, 12.0, accent_fg),
             text(label).size(13).color(accent_fg),
         ]
         .spacing(8)
@@ -189,24 +189,22 @@ pub fn primary_pill_icon_button<'a, Message: Clone + 'a>(
         text(label).size(13).color(accent_fg).into()
     };
 
-    button(content)
-        .padding([9, 20])
+    let th = theme.clone();
+    button(wrap_chrome(content, [9, 20], ButtonKind::Primary, &th, th.surface))
+        .padding(0)
         .style(move |_: &Theme, status| {
-            let is_hover = matches!(status, button::Status::Hovered);
-            button::Style {
-                background: Some(Background::Color(if is_hover {
-                    Color { a: 0.90, ..accent }
-                } else {
-                    accent
-                })),
-                text_color: accent_fg,
-                border: Border {
-                    color: accent,
-                    width: 1.0,
-                    radius: 20.0.into(),
-                },
-                ..Default::default()
-            }
+            let is_hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            compute_button_style(
+                ButtonKind::Primary,
+                true,
+                is_hover,
+                accent,
+                Color { a: 0.90, ..accent },
+                accent_fg,
+                accent,
+                20.0,
+                &th,
+            )
         })
         .on_press(msg)
         .into()
@@ -223,33 +221,41 @@ pub fn glyph_button<'a, Message: Clone + 'a>(
     let muted = theme.muted;
     let text_col = theme.text;
     let hover_bg = theme.card_hover;
+    let th = theme.clone();
 
-    button(text(glyph).font(ICON_FONT).size(size))
-        .padding([6, 9])
-        .style(move |_: &Theme, status| {
-            let is_hover = matches!(status, button::Status::Hovered);
-            button::Style {
-                background: Some(Background::Color(if is_hover {
-                    hover_bg
-                } else {
-                    Color::TRANSPARENT
-                })),
-                text_color: if active {
-                    accent
-                } else if is_hover {
-                    text_col
-                } else {
-                    muted
-                },
-                border: Border {
-                    radius: 999.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }
-        })
-        .on_press(msg)
-        .into()
+    button(wrap_chrome(
+        text(icons::map_glyph(glyph))
+            .font(icons::current_font())
+            .size(icons::adjusted_size(size)),
+        [6, 9],
+        ButtonKind::Glyph,
+        &th,
+        th.surface,
+    ))
+    .padding(0)
+    .style(move |_: &Theme, status| {
+        let is_hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let fg = if active {
+            accent
+        } else if is_hover {
+            text_col
+        } else {
+            muted
+        };
+        compute_button_style(
+            ButtonKind::Glyph,
+            active,
+            is_hover,
+            Color::TRANSPARENT,
+            hover_bg,
+            fg,
+            Color::TRANSPARENT,
+            999.0,
+            &th,
+        )
+    })
+    .on_press(msg)
+    .into()
 }
 
 pub fn play_circle_button<'a, Message: Clone + 'a>(
@@ -262,27 +268,38 @@ pub fn play_circle_button<'a, Message: Clone + 'a>(
     let idle_fg = theme.base;
     let accent = theme.accent;
     let accent_fg = theme.accent_fg;
+    let th = theme.clone();
 
-    button(
-        container(text(glyph).font(ICON_FONT).size(14))
-            .width(Length::Fixed(36.0))
-            .height(Length::Fixed(36.0))
-            .center_x(Length::Fixed(36.0))
-            .center_y(Length::Fixed(36.0)),
-    )
+    button(wrap_chrome(
+        container(
+            text(icons::map_glyph(glyph))
+                .font(icons::current_font())
+                .size(icons::adjusted_size(14.0)),
+        )
+        .width(Length::Fixed(36.0))
+        .height(Length::Fixed(36.0))
+        .center_x(Length::Fixed(36.0))
+        .center_y(Length::Fixed(36.0)),
+        [0, 0],
+        ButtonKind::Glyph,
+        &th,
+        th.sidebar,
+    ))
     .padding(0)
     .style(move |_: &Theme, status| {
-        let hover = matches!(status, button::Status::Hovered);
+        let hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
         let active_col = playing || hover;
-        button::Style {
-            background: Some(Background::Color(if active_col { accent } else { idle_bg })),
-            text_color: if active_col { accent_fg } else { idle_fg },
-            border: Border {
-                radius: 18.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
+        compute_button_style(
+            ButtonKind::Glyph,
+            playing,
+            hover,
+            if active_col { accent } else { idle_bg },
+            accent,
+            if active_col { accent_fg } else { idle_fg },
+            Color::TRANSPARENT,
+            18.0,
+            &th,
+        )
     })
     .on_press(msg)
     .into()
@@ -293,12 +310,14 @@ pub fn sidebar_nav_item<'a, Message: Clone + 'a>(
     glyph: &'a str,
     label: &'a str,
     active: bool,
+    has_plus: bool,
     theme: &ThemeSpec,
     msg: Message,
 ) -> Element<'a, Message> {
     let text_col = theme.text;
     let muted = theme.muted;
     let accent = theme.accent;
+    let accent_fg = theme.accent_fg;
     let card_hover = theme.card_hover;
 
     let indicator: Element<'a, Message> = if active {
@@ -318,32 +337,78 @@ pub fn sidebar_nav_item<'a, Message: Clone + 'a>(
         space::horizontal().width(Length::Fixed(3.0)).into()
     };
 
-    button(
-        row![
-            indicator,
-            text(glyph).font(ICON_FONT).size(15).width(Length::Fixed(22.0)),
-            text(label).size(14),
-        ]
+    let icon_cell: Element<'a, Message> = if has_plus {
+        let base_icon = container(
+            text(icons::map_glyph(glyph))
+                .font(icons::current_font())
+                .size(icons::adjusted_size(15.0)),
+        )
+        .width(Length::Fixed(24.0))
+        .height(Length::Fixed(20.0))
+        .center_y(Length::Fixed(20.0));
+        let plus_dot = container(
+            container(text("+").size(8).color(accent_fg))
+                .padding([0, 3])
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(accent)),
+                    border: Border {
+                        radius: 999.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+        )
+        .width(Length::Fixed(24.0))
+        .height(Length::Fixed(20.0))
+        .align_right(Length::Fixed(24.0))
+        .align_top(Length::Fixed(20.0));
+        stack([base_icon.into(), plus_dot.into()]).into()
+    } else {
+        text(icons::map_glyph(glyph))
+            .font(icons::current_font())
+            .size(icons::adjusted_size(15.0))
+            .width(Length::Fixed(22.0))
+            .into()
+    };
+
+    let mut row_items = Row::new()
+        .push(indicator)
+        .push(icon_cell)
+        .push(text(label).size(14))
         .spacing(8)
-        .align_y(Alignment::Center),
-    )
+        .align_y(Alignment::Center);
+    if has_plus {
+        row_items = row_items.push(
+            container(text("+").size(10).color(accent_fg))
+                .padding([1, 5])
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(accent)),
+                    border: Border {
+                        radius: 999.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+        );
+    }
+
+    let th = theme.clone();
+    button(wrap_chrome(row_items, [9, 10], ButtonKind::Nav, &th, th.surface))
     .width(Length::Fill)
-    .padding([9, 10])
+    .padding(0)
     .style(move |_: &Theme, status| {
-        let hover = matches!(status, button::Status::Hovered);
-        button::Style {
-            background: Some(Background::Color(if hover {
-                card_hover
-            } else {
-                Color::TRANSPARENT
-            })),
-            text_color: if active || hover { text_col } else { muted },
-            border: Border {
-                radius: 8.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
+        let hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        compute_button_style(
+            ButtonKind::Nav,
+            false,
+            hover,
+            Color::TRANSPARENT,
+            card_hover,
+            if active || hover { text_col } else { muted },
+            Color::TRANSPARENT,
+            8.0,
+            &th,
+        )
     })
     .on_press(msg)
     .into()
@@ -365,6 +430,7 @@ fn compact_short_label(label: &str) -> String {
         "Now Playing" => "Playing".to_string(),
         "Inspector" => "Inspect".to_string(),
         "Spatial Audio" => "Spatial".to_string(),
+        "Reactive UI" => "Reactive".to_string(),
         _ => label.chars().take(8).collect(),
     }
 }
@@ -373,6 +439,7 @@ pub fn compact_nav_button<'a, Message: Clone + 'a>(
     glyph: &'a str,
     label: &'a str,
     active: bool,
+    has_plus: bool,
     theme: &ThemeSpec,
     msg: Message,
 ) -> Element<'a, Message> {
@@ -386,54 +453,86 @@ pub fn compact_nav_button<'a, Message: Clone + 'a>(
     let tip_bg = theme.surface;
 
     let short_label = compact_short_label(label);
-    let btn = button(
-        container(
-            column![
-                text(glyph).font(ICON_FONT).size(15),
-                text(short_label).size(8),
-            ]
-            .spacing(2)
-            .align_x(Alignment::Center),
+    let tile_content: Element<'a, Message> = container(
+        column![
+            text(icons::map_glyph(glyph))
+                .font(icons::current_font())
+                .size(icons::adjusted_size(15.0)),
+            text(short_label).size(8),
+        ]
+        .spacing(2)
+        .align_x(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
+    .into();
+
+    let btn_body: Element<'a, Message> = if has_plus {
+        let plus_badge = container(
+            container(
+                text("+")
+                    .size(9)
+                    .color(if active { accent } else { accent_fg }),
+            )
+            .padding([0, 4])
+            .style(move |_| container::Style {
+                background: Some(Background::Color(if active { accent_fg } else { accent })),
+                border: Border {
+                    radius: 999.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
         )
         .width(Length::Fill)
         .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill),
-    )
+        .align_right(Length::Fill)
+        .align_top(Length::Fill)
+        .padding([2, 3]);
+        stack([tile_content, plus_badge.into()]).into()
+    } else {
+        tile_content
+    };
+
+    let th = theme.clone();
+    let btn = button(wrap_chrome(btn_body, [2, 2], ButtonKind::Nav, &th, th.surface))
     .width(Length::Fill)
     .height(Length::Fixed(46.0))
-    .padding([2, 2])
+    .padding(0)
     .style(move |_: &Theme, status| {
-        let hover = matches!(status, button::Status::Hovered);
-        button::Style {
-            background: Some(Background::Color(if active {
-                accent
-            } else if hover {
-                card_hover
-            } else {
-                card
-            })),
-            text_color: if active {
+        let hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        compute_button_style(
+            ButtonKind::Nav,
+            active,
+            hover,
+            card,
+            card_hover,
+            if active {
                 accent_fg
             } else if hover {
                 text_col
             } else {
                 muted
             },
-            border: Border {
-                color: if active { accent } else { border },
-                width: 1.0,
-                radius: 9.0.into(),
-            },
-            ..Default::default()
-        }
+            if active { accent } else { border },
+            9.0,
+            &th,
+        )
     })
     .on_press(msg);
+
+    let tip_txt = if has_plus {
+        format!("{label}+ (Enhanced)")
+    } else {
+        label.to_string()
+    };
 
     container(
         tooltip(
             btn,
-            container(text(label).size(12).color(text_col))
+            container(text(tip_txt).size(12).color(text_col))
                 .padding([4, 8])
                 .style(move |_| container::Style {
                     background: Some(Background::Color(tip_bg)),
@@ -472,12 +571,7 @@ pub fn folder_sidebar_item<'a, Message: Clone + 'a>(
             .height(Length::Fixed(44.0))
             .into()
     } else {
-        container(
-            text(fallback_glyph)
-                .font(ICON_FONT)
-                .size(16)
-                .color(if active { accent } else { muted }),
-        )
+        container(icons::icon(fallback_glyph, 16.0, if active { accent } else { muted }))
         .width(Length::Fixed(44.0))
         .height(Length::Fixed(44.0))
         .center_x(Length::Fixed(44.0))
@@ -510,7 +604,8 @@ pub fn folder_sidebar_item<'a, Message: Clone + 'a>(
         })
         .into();
 
-    button(
+    let th = theme.clone();
+    button(wrap_chrome(
         row![
             left_bar,
             thumb,
@@ -523,26 +618,26 @@ pub fn folder_sidebar_item<'a, Message: Clone + 'a>(
         ]
         .spacing(10)
         .align_y(Alignment::Center),
-    )
+        [6, 8],
+        ButtonKind::Nav,
+        &th,
+        th.surface,
+    ))
     .width(Length::Fill)
-    .padding([6, 8])
+    .padding(0)
     .style(move |_: &Theme, status| {
-        let hover = matches!(status, button::Status::Hovered);
-        button::Style {
-            background: Some(Background::Color(if active {
-                card
-            } else if hover {
-                card_hover
-            } else {
-                Color::TRANSPARENT
-            })),
-            text_color: text_col,
-            border: Border {
-                radius: 8.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
+        let hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        compute_button_style(
+            ButtonKind::Nav,
+            false,
+            hover,
+            if active { card } else { Color::TRANSPARENT },
+            card_hover,
+            text_col,
+            Color::TRANSPARENT,
+            8.0,
+            &th,
+        )
     })
     .on_press(msg)
     .into()
@@ -554,33 +649,39 @@ pub fn theme_swatch_circle<'a, Message: Clone + 'a>(
     selected: bool,
     on_select: Message,
 ) -> Element<'a, Message> {
-    let circle_col = if spec.slug == "openify" {
-        spec.accent
-    } else if spec.is_light {
-        spec.sidebar
-    } else {
-        spec.accent
-    };
+    let base_col = spec.sidebar;
+    let accent_col = spec.logo_color;
     let ring_col = if selected { spec.text } else { spec.border };
     let muted = spec.muted;
     let text_col = spec.text;
     let label = spec.label.clone();
+    let logo_thumb: Element<'a, Message> = if let Some(h) = crate::logo::cached_tinted_logo_handle(accent_col) {
+        iced::widget::image(h)
+            .width(Length::Fixed(18.0))
+            .height(Length::Fixed(16.0))
+            .content_fit(iced::ContentFit::Contain)
+            .into()
+    } else {
+        text("").into()
+    };
 
     button(
         column![
-            container(text(""))
-                .width(Length::Fixed(36.0))
-                .height(Length::Fixed(36.0))
+            container(logo_thumb)
+                .width(Length::Fixed(38.0))
+                .height(Length::Fixed(38.0))
+                .center_x(Length::Fixed(38.0))
+                .center_y(Length::Fixed(38.0))
                 .style(move |_| container::Style {
-                    background: Some(Background::Color(circle_col)),
+                    background: Some(Background::Color(base_col)),
                     border: Border {
                         color: ring_col,
                         width: if selected { 2.5 } else { 1.5 },
-                        radius: 18.0.into(),
+                        radius: 19.0.into(),
                     },
                     shadow: if selected {
                         Shadow {
-                            color: Color { a: 0.55, ..circle_col },
+                            color: Color { a: 0.60, ..accent_col },
                             offset: Vector::ZERO,
                             blur_radius: 10.0,
                         }
@@ -635,25 +736,23 @@ pub fn track_row_button<'a, Message: Clone + 'a>(
         Color::TRANSPARENT
     };
 
-    button(content)
+    let th = theme.clone();
+    button(wrap_chrome(content, padding, ButtonKind::Row, &th, th.surface))
         .width(Length::Fill)
-        .padding(padding)
+        .padding(0)
         .style(move |_: &Theme, status| {
-            let hover = matches!(status, button::Status::Hovered);
-            button::Style {
-                background: Some(Background::Color(if hover && !playing {
-                    card_hover
-                } else {
-                    row_bg
-                })),
-                text_color: text_col,
-                border: Border {
-                    radius: 8.0.into(),
-                    color: if playing { accent } else { Color::TRANSPARENT },
-                    width: if playing { 1.0 } else { 0.0 },
-                },
-                ..Default::default()
-            }
+            let hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            compute_button_style(
+                ButtonKind::Row,
+                false,
+                hover,
+                row_bg,
+                card_hover,
+                text_col,
+                if playing { accent } else { Color::TRANSPARENT },
+                8.0,
+                &th,
+            )
         })
         .on_press(msg)
         .into()
@@ -663,7 +762,7 @@ pub fn render_ext_widget<'a, Message: Clone + 'a, F, FIn>(
     widget: &'a ExtWidget,
     ext_id: &'a str,
     theme: &ThemeSpec,
-    viz: &VizFrameData,
+    viz: &ExtVizCtx<'a, Message>,
     inputs: &'a HashMap<(String, String), String>,
     make_action: F,
     make_input: FIn,
@@ -847,29 +946,34 @@ where
             playing,
             volume,
             speed,
-        } => card_box(
-            column![
-                row![
-                    icons::icon(icons::BARS, 13.0, theme.accent),
-                    text(format!("{} SCENE", mode.to_uppercase()))
-                        .size(11)
-                        .color(theme.muted),
-                    space::horizontal(),
-                    text(if *playing { "LIVE" } else { "IDLE" })
-                        .size(11)
-                        .color(if *playing { theme.accent } else { theme.muted }),
+        } => {
+            if mode.trim().eq_ignore_ascii_case("gif") {
+                return render_gif_visualizer_stage(theme, viz, *playing);
+            }
+            card_box(
+                column![
+                    row![
+                        icons::icon(icons::BARS, 13.0, theme.accent),
+                        text(format!("{} SCENE", mode.to_uppercase()))
+                            .size(11)
+                            .color(theme.muted),
+                        space::horizontal(),
+                        text(if *playing { "LIVE" } else { "IDLE" })
+                            .size(11)
+                            .color(if *playing { theme.accent } else { theme.muted }),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                    visualizer_canvas(mode, &viz.frame, *playing, *volume, *speed, theme),
                 ]
-                .spacing(6)
-                .align_y(Alignment::Center),
-                visualizer_canvas(mode, viz, *playing, *volume, *speed, theme),
-            ]
-            .spacing(8)
-            .padding(10),
-            theme,
-            *playing,
-        )
-        .width(Length::Fill)
-        .into(),
+                .spacing(8)
+                .padding(10),
+                theme,
+                *playing,
+            )
+            .width(Length::Fill)
+            .into()
+        }
         ExtWidget::Grid { columns, children } => {
             let cols = (*columns).clamp(1, 6);
             let mut grid = Column::new().spacing(10).width(Length::Fill);
@@ -1059,21 +1163,23 @@ where
             aid.to_string(),
             serde_json::Value::Bool(true),
         );
-        button(container(body).padding(pad).width(Length::Fill))
+        let th = theme.clone();
+        button(wrap_chrome(container(body).width(Length::Fill), pad, ButtonKind::Tile, &th, th.surface))
             .padding(0)
             .width(Length::Fill)
             .style(move |_, status| {
                 let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-                button::Style {
-                    background: Some(Background::Color(if hovered { hover_bg } else { bg })),
-                    text_color: text_col,
-                    border: Border {
-                        color: border_col,
-                        width: if active || hovered { 1.2 } else { 0.8 },
-                        radius: radius.into(),
-                    },
-                    ..Default::default()
-                }
+                compute_button_style(
+                    ButtonKind::Tile,
+                    active,
+                    hovered,
+                    bg,
+                    hover_bg,
+                    text_col,
+                    border_col,
+                    radius,
+                    &th,
+                )
             })
             .on_press(msg)
             .into()
@@ -1177,31 +1283,34 @@ pub fn context_menu_item<'a, Message: Clone + 'a>(
         theme.card_hover
     };
 
-    button(
+    let th = theme.clone();
+    button(wrap_chrome(
         row![
             container(icons::icon(glyph, 13.0, icon_col)).width(Length::Fixed(18.0)),
             text(label).size(13).color(fg),
         ]
         .spacing(10)
         .align_y(Alignment::Center),
-    )
+        [7, 12],
+        ButtonKind::Row,
+        &th,
+        th.surface,
+    ))
     .width(Length::Fill)
-    .padding([7, 12])
+    .padding(0)
     .style(move |_, status| {
         let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-        button::Style {
-            background: Some(Background::Color(if hovered {
-                hover_bg
-            } else {
-                Color::TRANSPARENT
-            })),
-            text_color: fg,
-            border: Border {
-                radius: 7.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
+        compute_button_style(
+            ButtonKind::Row,
+            false,
+            hovered,
+            Color::TRANSPARENT,
+            hover_bg,
+            fg,
+            Color::TRANSPARENT,
+            7.0,
+            &th,
+        )
     })
     .on_press(msg)
     .into()
@@ -1233,4 +1342,170 @@ pub fn context_menu_panel<'a, Message: 'a>(
             ..Default::default()
         })
         .into()
+}
+
+fn truncate_filename(name: &str, max_chars: usize) -> String {
+    if name.chars().count() <= max_chars {
+        return name.to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let prefix: String = name.chars().take(keep).collect();
+    format!("{prefix}...")
+}
+
+fn render_gif_visualizer_stage<'a, Message: Clone + 'a>(
+    theme: &ThemeSpec,
+    viz: &ExtVizCtx<'a, Message>,
+    playing: bool,
+) -> Element<'a, Message> {
+    let bass = (viz.frame.bands[0] + viz.frame.bands[1] + viz.frame.bands[2] + viz.frame.bands[3]) * 0.25;
+    let flash = viz.gif.flash.clamp(0.0, 1.0);
+    let accent = theme.accent;
+    let border_col = Color {
+        a: (0.28 + flash * 0.72 + bass * 0.25).clamp(0.25, 1.0),
+        ..accent
+    };
+    let glow_col = Color {
+        a: (0.08 + flash * 0.45).clamp(0.0, 0.65),
+        ..accent
+    };
+    let stage_bg = Color::from_rgb8(0x09, 0x0b, 0x10);
+    let chip_bg = Color::from_rgba(0.05, 0.06, 0.09, 0.78);
+    let text_col = theme.text;
+    let muted = theme.muted;
+
+    let stage_body: Element<'a, Message> = if let Some(handle) = viz.gif.handle {
+        let img = image(handle.clone())
+            .content_fit(ContentFit::Contain)
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        let name_lbl = truncate_filename(viz.gif.name, 36);
+        let bass_pct = ((bass * 100.0).round() as u32).min(100);
+        let overlay = container(
+            row![
+                container(
+                    text(name_lbl).size(11).color(text_col),
+                )
+                .padding([4, 9])
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(chip_bg)),
+                    border: Border {
+                        color: Color { a: 0.25, ..accent },
+                        width: 1.0,
+                        radius: 999.0.into(),
+                    },
+                    ..Default::default()
+                }),
+                space::horizontal(),
+                container(
+                    text(if flash > 0.25 {
+                        format!("BASS HIT · {bass_pct}%")
+                    } else {
+                        format!("LOW FREQ · {bass_pct}%")
+                    })
+                    .size(11)
+                    .color(if flash > 0.25 { accent } else { muted }),
+                )
+                .padding([4, 9])
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(chip_bg)),
+                    border: Border {
+                        color: if flash > 0.25 { accent } else { Color::from_rgba(1.0, 1.0, 1.0, 0.12) },
+                        width: 1.0,
+                        radius: 999.0.into(),
+                    },
+                    ..Default::default()
+                }),
+            ]
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_bottom(Length::Fill)
+        .padding(10);
+
+        button(stack([img.into(), overlay.into()]))
+            .padding(0)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_, _| button::Style {
+                background: None,
+                ..Default::default()
+            })
+            .on_press(viz.on_next_gif.clone())
+            .into()
+    } else {
+        let msg = if viz.gif.total_gifs > 0 {
+            format!("Loading random GIFs from {} ({} found)...", viz.gif.dir, viz.gif.total_gifs)
+        } else {
+            format!("No .gif files found in {}", viz.gif.dir)
+        };
+        container(text(msg).size(12).color(muted))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into()
+    };
+
+    let stage = container(stage_body)
+        .width(Length::Fill)
+        .height(Length::Fixed(296.0))
+        .style(move |_| container::Style {
+            background: Some(Background::Color(stage_bg)),
+            border: Border {
+                color: border_col,
+                width: 1.2 + flash * 1.4,
+                radius: 12.0.into(),
+            },
+            shadow: Shadow {
+                color: glow_col,
+                offset: Vector::ZERO,
+                blur_radius: 14.0 * flash,
+            },
+            ..Default::default()
+        });
+
+    let status_lbl = if flash > 0.25 {
+        "BASS HIT"
+    } else if playing {
+        "LIVE"
+    } else {
+        "IDLE"
+    };
+
+    card_box(
+        column![
+            row![
+                icons::icon(icons::WAVE, 13.0, accent),
+                text(format!(
+                    "GIF SHOWER · {} GIFs · {} bass switches",
+                    viz.gif.total_gifs, viz.gif.switches
+                ))
+                .size(11)
+                .color(muted),
+                space::horizontal(),
+                pill_icon_button(
+                    "Next GIF",
+                    Some(icons::SHUFFLE),
+                    theme,
+                    false,
+                    viz.on_next_gif.clone(),
+                ),
+                text(status_lbl)
+                    .size(11)
+                    .color(if playing || flash > 0.25 { accent } else { muted }),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            stage,
+        ]
+        .spacing(8)
+        .padding(10),
+        theme,
+        playing || flash > 0.25,
+    )
+    .width(Length::Fill)
+    .into()
 }

@@ -236,10 +236,10 @@ Place each extension in its own folder inside `~/.config/tntron/extensions/<ext-
 - `audio:dsp` — `tntron.audio.set_filter(mpv_af)`, `tntron.audio.clear_filter()` (per-extension composed stage)
 - `fs:write` — `tntron.fs.create_folder(name)`, `delete_folder(path)`, `copy_to_folder(track, folder)`, `delete_file(path)` (jailed inside music root)
 - `ui:sidebar` — `tntron.ui.register_sidebar({ id, label, icon, widgets })`, `unregister_sidebar(id)`, `set_compact_menu(bool)`
-- `ui:settings` — `tntron.ui.register_settings({ id?, title, widgets })`, `tntron.ui.set_density("Compact"|"Normal"|"Large")`, `tntron.ui.set_layout("table"|"cards"|"gallery"|"minimal")`, `tntron.ui.set_compact_menu(bool)`, `tntron.extensions.set_all(bool)`
+- `ui:settings` — `tntron.ui.register_settings({ id?, title, widgets })`, `set_density("Compact"|"Normal"|"Large")`, `set_layout("table"|"cards"|"gallery"|"minimal")`, `set_layout_config(patch)`, `set_reactive_config(patch)`, `set_icon_config(patch)`, `set_button_config(patch)`, `set_logo_config(patch)`, `set_transparency_config(patch)`, `set_popup_config(patch)`, `copy_clipboard(str)`, `request_clipboard_paste()`, `set_compact_menu(bool)`, `tntron.extensions.set_all(bool)`
 - `ui:topbar` — `tntron.ui.set_topbar_slot({ text, icon?, accent?, action_id? })`, `clear_topbar_slot()`
 - `ui:player_widget` — `tntron.ui.set_player_widget({ text, icon?, accent?, action_id? })`, `clear_player_widget()`
-- `themes:register` — `tntron.themes.register({ slug, label, base, sidebar, main, card, card_hover, text, text_sub, accent })`, `tntron.themes.set_active(slug)`
+- `themes:register` — `tntron.themes.register({ slug, label, base, sidebar, main, card, card_hover, text, text_sub, accent, logo_color? })`, `tntron.themes.set_active(slug)`, `tntron.ui.set_logo_config({ enabled?, mode?, custom_hex?, custom_path?, frame_style?, size_px?, beat_pulse? })`
 - `storage` — `tntron.storage.get(key, default)`, `tntron.storage.set(key, val)`
 - `notify` — `tntron.ui.toast(message)`, `tntron.notify.desktop(summary, body)`
 - `network` — `tntron.net.fetch_rss(url)`, `tntron.net.yt_search(query)`, `tntron.net.yt_play(url, title?)`, `tntron.net.yt_download(url)` (requires `fs:write` too)
@@ -865,6 +865,7 @@ Place each extension in its own folder inside `~/.config/tntron/extensions/<ext-
                     text,
                     text_sub,
                     accent,
+                    logo_color,
                 } if perms.contains("themes:register") => {
                     self.themes.retain(|t| t.slug != slug);
                     self.themes.push(ExtRegisteredTheme {
@@ -879,6 +880,7 @@ Place each extension in its own folder inside `~/.config/tntron/extensions/<ext-
                         text,
                         text_sub,
                         accent,
+                        logo_color,
                     });
                 }
                 ExtHostCommand::SetAudioFilter { .. }
@@ -920,6 +922,16 @@ Place each extension in its own folder inside `~/.config/tntron/extensions/<ext-
                 }
                 ExtHostCommand::UiSetLayout { .. }
                 | ExtHostCommand::UiSetLayoutConfig { .. }
+                | ExtHostCommand::UiSetReactiveConfig { .. }
+                | ExtHostCommand::UiSetIconConfig { .. }
+                | ExtHostCommand::UiSetButtonConfig { .. }
+                | ExtHostCommand::UiSetLogoConfig { .. }
+                | ExtHostCommand::UiSetTransparencyConfig { .. }
+                | ExtHostCommand::UiSetPopupConfig { .. }
+                | ExtHostCommand::UiCopyClipboard { .. }
+                | ExtHostCommand::UiRequestClipboardPaste
+                | ExtHostCommand::PopupLaunch
+                | ExtHostCommand::PopupClose
                     if perms.contains("ui:settings") || perms.contains("ui:sidebar") =>
                 {
                     runtime_out.push(cmd);
@@ -977,7 +989,8 @@ Place each extension in its own folder inside `~/.config/tntron/extensions/<ext-
                 ExtHostCommand::LyricsLoad { .. } if perms.contains("library:read") => {
                     runtime_out.push(cmd);
                 }
-                ExtHostCommand::NetFetchRss { .. }
+                ExtHostCommand::LyricsTranslate { .. }
+                | ExtHostCommand::NetFetchRss { .. }
                 | ExtHostCommand::NetYtSearch { .. }
                 | ExtHostCommand::NetYtPlay { .. }
                     if perms.contains("network") =>
@@ -1350,6 +1363,116 @@ fn install_sdk(lua: &Lua, bridge: &SharedBridge) -> mlua::Result<()> {
             })?,
         )?;
     }
+    {
+        let br = Arc::clone(bridge);
+        fs_tbl.set(
+            "save_tnt",
+            lua.create_function(
+                move |lua, (name_or_path, tbl, fmt): (String, LuaValue, Option<String>)| {
+                    let b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                    if !(b.has_perm("storage") || b.has_perm("fs:write")) {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "Extension '{}' lacks permission 'storage' or 'fs:write'",
+                            b.ext_id
+                        )));
+                    }
+                    drop(b);
+                    let cfg: serde_json::Value = lua.from_value(tbl)?;
+                    let base_dir = crate::storage::default_tnt_dir();
+                    let tnt_fmt = fmt.as_deref().unwrap_or("tntron-reactive-v1");
+                    match crate::storage::save_tnt_file_with_format(
+                        &name_or_path,
+                        tnt_fmt,
+                        cfg,
+                        &base_dir,
+                    ) {
+                        Ok(path) => Ok((Some(path.display().to_string()), Option::<String>::None)),
+                        Err(e) => Ok((None, Some(e))),
+                    }
+                },
+            )?,
+        )?;
+    }
+    {
+        fs_tbl.set(
+            "format_tnt_share",
+            lua.create_function(
+                move |lua, (tbl, fmt, name): (LuaValue, Option<String>, Option<String>)| {
+                    let cfg: serde_json::Value = lua.from_value(tbl)?;
+                    let tnt_fmt = fmt.as_deref().unwrap_or("tntron-reactive-v1");
+                    let tnt_name = name.as_deref().unwrap_or("shared_preset");
+                    match crate::storage::format_tnt_share_json(tnt_fmt, tnt_name, cfg) {
+                        Ok(s) => Ok((Some(s), Option::<String>::None)),
+                        Err(e) => Ok((None, Some(e))),
+                    }
+                },
+            )?,
+        )?;
+    }
+    {
+        fs_tbl.set(
+            "parse_tnt_share",
+            lua.create_function(move |lua, raw: String| {
+                match crate::storage::parse_tnt_share_json(&raw) {
+                    Ok(val) => {
+                        let lv = json_to_lua(lua, &val)?;
+                        Ok((lv, Option::<String>::None))
+                    }
+                    Err(e) => Ok((LuaValue::Nil, Some(e))),
+                }
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        fs_tbl.set(
+            "load_tnt",
+            lua.create_function(move |lua, name_or_path: String| {
+                let b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                if !(b.has_perm("storage") || b.has_perm("fs:write")) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "Extension '{}' lacks permission 'storage' or 'fs:write'",
+                        b.ext_id
+                    )));
+                }
+                drop(b);
+                let base_dir = crate::storage::default_tnt_dir();
+                match crate::storage::load_tnt_file(&name_or_path, &base_dir) {
+                    Ok(val) => {
+                        let lv = json_to_lua(lua, &val)?;
+                        Ok((lv, Option::<String>::None))
+                    }
+                    Err(e) => Ok((LuaValue::Nil, Some(e))),
+                }
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        fs_tbl.set(
+            "list_tnt",
+            lua.create_function(move |lua, ()| {
+                let b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                if !(b.has_perm("storage") || b.has_perm("fs:write")) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "Extension '{}' lacks permission 'storage' or 'fs:write'",
+                        b.ext_id
+                    )));
+                }
+                drop(b);
+                let base_dir = crate::storage::default_tnt_dir();
+                let list = crate::storage::list_tnt_files(&base_dir);
+                let arr = lua.create_table()?;
+                for (i, (name, path)) in list.into_iter().enumerate() {
+                    let row = lua.create_table()?;
+                    row.set("name", name)?;
+                    row.set("path", path.display().to_string())?;
+                    arr.set(i + 1, row)?;
+                }
+                Ok(arr)
+            })?,
+        )?;
+    }
     root.set("fs", fs_tbl)?;
 
     // tntron.extensions
@@ -1614,17 +1737,38 @@ fn install_sdk(lua: &Lua, bridge: &SharedBridge) -> mlua::Result<()> {
         let br = Arc::clone(bridge);
         lyrics.set(
             "load",
-            lua.create_function(move |_, (path, title, artist, duration_sec): (String, String, String, f64)| {
-                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
-                b.require_perm("library:read")?;
-                b.pending_cmds.push(ExtHostCommand::LyricsLoad {
-                    path,
-                    title,
-                    artist,
-                    duration_sec,
-                });
-                Ok(())
-            })?,
+            lua.create_function(
+                move |_, (path, title, artist, duration_sec, provider): (String, String, String, f64, Option<String>)| {
+                    let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                    b.require_perm("library:read")?;
+                    b.pending_cmds.push(ExtHostCommand::LyricsLoad {
+                        path,
+                        title,
+                        artist,
+                        duration_sec,
+                        provider,
+                    });
+                    Ok(())
+                },
+            )?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        lyrics.set(
+            "translate",
+            lua.create_function(
+                move |_, (path, lines, target_lang): (String, Vec<String>, Option<String>)| {
+                    let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                    b.require_perm("network")?;
+                    b.pending_cmds.push(ExtHostCommand::LyricsTranslate {
+                        path,
+                        target_lang: target_lang.unwrap_or_else(|| "en".to_string()),
+                        lines,
+                    });
+                    Ok(())
+                },
+            )?,
         )?;
     }
     root.set("lyrics", lyrics)?;
@@ -1838,6 +1982,185 @@ fn bind_ui_sdk(lua: &Lua, ui: &Table, bridge: &SharedBridge) -> mlua::Result<()>
                 }
                 let patch: serde_json::Value = lua.from_value(patch_tbl)?;
                 b.pending_cmds.push(ExtHostCommand::UiSetLayoutConfig { patch });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        ui.set(
+            "set_reactive_config",
+            lua.create_function(move |lua, patch_tbl: LuaValue| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                if !(b.has_perm("ui:settings") || b.has_perm("ui:sidebar")) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "Extension '{}' lacks permission 'ui:sidebar'",
+                        b.ext_id
+                    )));
+                }
+                let patch: serde_json::Value = lua.from_value(patch_tbl)?;
+                b.pending_cmds.push(ExtHostCommand::UiSetReactiveConfig { patch });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        ui.set(
+            "set_icon_config",
+            lua.create_function(move |lua, patch_tbl: LuaValue| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                if !(b.has_perm("ui:settings") || b.has_perm("ui:sidebar")) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "Extension '{}' lacks permission 'ui:sidebar'",
+                        b.ext_id
+                    )));
+                }
+                let patch: serde_json::Value = lua.from_value(patch_tbl)?;
+                b.pending_cmds.push(ExtHostCommand::UiSetIconConfig { patch });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        ui.set(
+            "set_button_config",
+            lua.create_function(move |lua, patch_tbl: LuaValue| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                if !(b.has_perm("ui:settings") || b.has_perm("ui:sidebar")) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "Extension '{}' lacks permission 'ui:sidebar'",
+                        b.ext_id
+                    )));
+                }
+                let patch: serde_json::Value = lua.from_value(patch_tbl)?;
+                b.pending_cmds.push(ExtHostCommand::UiSetButtonConfig { patch });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        ui.set(
+            "set_logo_config",
+            lua.create_function(move |lua, patch_tbl: LuaValue| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                if !(b.has_perm("ui:settings")
+                    || b.has_perm("ui:sidebar")
+                    || b.has_perm("themes:register"))
+                {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "Extension '{}' lacks permission 'ui:settings'",
+                        b.ext_id
+                    )));
+                }
+                let patch: serde_json::Value = lua.from_value(patch_tbl)?;
+                b.pending_cmds.push(ExtHostCommand::UiSetLogoConfig { patch });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        ui.set(
+            "copy_clipboard",
+            lua.create_function(move |_, text: String| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                if !(b.has_perm("ui:settings") || b.has_perm("ui:sidebar")) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "Extension '{}' lacks permission 'ui:sidebar'",
+                        b.ext_id
+                    )));
+                }
+                b.pending_cmds.push(ExtHostCommand::UiCopyClipboard { text });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        ui.set(
+            "paste_clipboard",
+            lua.create_function(move |_, ()| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                if !(b.has_perm("ui:settings") || b.has_perm("ui:sidebar")) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "Extension '{}' lacks permission 'ui:sidebar'",
+                        b.ext_id
+                    )));
+                }
+                b.pending_cmds.push(ExtHostCommand::UiRequestClipboardPaste);
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        ui.set(
+            "set_transparency_config",
+            lua.create_function(move |lua, patch_tbl: LuaValue| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                if !(b.has_perm("ui:settings") || b.has_perm("ui:sidebar")) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "Extension '{}' lacks permission 'ui:sidebar'",
+                        b.ext_id
+                    )));
+                }
+                let patch: serde_json::Value = lua.from_value(patch_tbl)?;
+                b.pending_cmds.push(ExtHostCommand::UiSetTransparencyConfig { patch });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        ui.set(
+            "set_popup_config",
+            lua.create_function(move |lua, patch_tbl: LuaValue| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                if !(b.has_perm("ui:settings") || b.has_perm("ui:sidebar")) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "Extension '{}' lacks permission 'ui:sidebar'",
+                        b.ext_id
+                    )));
+                }
+                let patch: serde_json::Value = lua.from_value(patch_tbl)?;
+                b.pending_cmds.push(ExtHostCommand::UiSetPopupConfig { patch });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        ui.set(
+            "launch_popup",
+            lua.create_function(move |_, ()| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                if !(b.has_perm("ui:settings") || b.has_perm("ui:sidebar")) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "Extension '{}' lacks permission 'ui:sidebar'",
+                        b.ext_id
+                    )));
+                }
+                b.pending_cmds.push(ExtHostCommand::PopupLaunch);
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        ui.set(
+            "close_popup",
+            lua.create_function(move |_, ()| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                if !(b.has_perm("ui:settings") || b.has_perm("ui:sidebar")) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "Extension '{}' lacks permission 'ui:sidebar'",
+                        b.ext_id
+                    )));
+                }
+                b.pending_cmds.push(ExtHostCommand::PopupClose);
                 Ok(())
             })?,
         )?;
@@ -2363,7 +2686,11 @@ end
         host.discover(&root);
 
         let cards = host.cards();
-        assert_eq!(cards.len(), 31, "expected 31 bundled extensions");
+        assert_eq!(
+            cards.len(),
+            crate::bundled_extensions::BUNDLED_EXTENSIONS.len(),
+            "expected all bundled extensions"
+        );
         for c in &cards {
             assert!(c.error.is_none(), "manifest error in {}: {:?}", c.id, c.error);
         }
@@ -2578,6 +2905,119 @@ end
             .iter()
             .any(|(_, c)| matches!(c, ExtHostCommand::StorageSet { key, .. } if key == "color_hex")));
 
+        let reactive_cmds = host.dispatch_action(
+            "tntron.reactive-ui",
+            "eqs:mirrored",
+            serde_json::Value::Bool(true),
+            &pb,
+            &lib,
+            &storage,
+        );
+        assert!(reactive_cmds.iter().any(|(_, c)| matches!(
+            c,
+            ExtHostCommand::UiSetReactiveConfig { patch }
+                if patch.get("eq_style").and_then(|v| v.as_str()) == Some("mirrored")
+        )));
+
+        let icon_cmds = host.dispatch_action(
+            "tntron.icon-packs",
+            "pack:material",
+            serde_json::Value::Bool(true),
+            &pb,
+            &lib,
+            &storage,
+        );
+        assert!(icon_cmds.iter().any(|(_, c)| matches!(
+            c,
+            ExtHostCommand::UiSetIconConfig { patch }
+                if patch.get("pack").and_then(|v| v.as_str()) == Some("material")
+        )));
+
+        let trans_cmds = host.dispatch_action(
+            "tntron.transparency",
+            "pre:glass",
+            serde_json::Value::Bool(true),
+            &pb,
+            &lib,
+            &storage,
+        );
+        assert!(trans_cmds.iter().any(|(_, c)| matches!(
+            c,
+            ExtHostCommand::UiSetTransparencyConfig { patch }
+                if patch.get("enabled").and_then(|v| v.as_bool()) == Some(true)
+        )));
+
+        let popup_cmds = host.dispatch_action(
+            "tntron.popup-player",
+            "term:kitty",
+            serde_json::Value::Bool(true),
+            &pb,
+            &lib,
+            &storage,
+        );
+        assert!(popup_cmds.iter().any(|(_, c)| matches!(
+            c,
+            ExtHostCommand::UiSetPopupConfig { patch }
+                if patch.get("terminal").and_then(|v| v.as_str()) == Some("kitty")
+        )));
+
+        let btn_cmds = host.dispatch_action(
+            "tntron.button-packs",
+            "pre:cyberpunk",
+            serde_json::Value::Bool(true),
+            &pb,
+            &lib,
+            &storage,
+        );
+        assert!(btn_cmds.iter().any(|(_, c)| matches!(
+            c,
+            ExtHostCommand::UiSetButtonConfig { patch }
+                if patch.get("preset").and_then(|v| v.as_str()) == Some("cyberpunk")
+        )));
+        let btn_share = host.dispatch_action(
+            "tntron.button-packs",
+            "copy_share",
+            serde_json::Value::Bool(true),
+            &pb,
+            &lib,
+            &storage,
+        );
+        assert!(btn_share.iter().any(|(_, c)| matches!(
+            c,
+            ExtHostCommand::UiCopyClipboard { text } if text.contains("tntron-buttons-v1")
+        )));
+
+        let rui_cmds = host.dispatch_action(
+            "tntron.reactive-ui",
+            "glw:spiral",
+            serde_json::Value::Bool(true),
+            &pb,
+            &lib,
+            &storage,
+        );
+        assert!(rui_cmds.iter().any(|(_, c)| matches!(
+            c,
+            ExtHostCommand::UiSetReactiveConfig { patch }
+                if patch.get("glow_particle_style").and_then(|v| v.as_str()) == Some("spiral")
+        )));
+
+        assert!(host.themes.iter().any(|t| {
+            t.slug == "catppuccin" && t.logo_color.as_deref() == Some("#cba6f7")
+        }));
+        let logo_cmds = host.dispatch_action(
+            "tntron.better-themes",
+            "logo_frame:glow",
+            serde_json::Value::Bool(true),
+            &pb,
+            &lib,
+            &storage,
+        );
+        assert!(logo_cmds.iter().any(|(_, c)| matches!(
+            c,
+            ExtHostCommand::UiSetLogoConfig { patch }
+                if patch.get("frame_style").and_then(|v| v.as_str()) == Some("glow")
+        )));
+
         assert!(host.compact_menu, "openify.compact-menu should toggle compact_menu");
         let _ = host.dispatch_action(
             "openify.compact-menu",
@@ -2589,7 +3029,7 @@ end
         );
         assert!(!host.compact_menu, "compact-menu toggle should disable compact_menu");
 
-        // Targeted async callbacks (lyrics, rss, ytdlp)
+        // Targeted async callbacks (lyrics, translation, rss, ytdlp)
         let _ = host.dispatch_event_to_ext(
             "openify.lyrics",
             "lyricsLoaded",
@@ -2597,6 +3037,31 @@ end
                 "path": "/tmp/night.mp3",
                 "source": "Local .lrc",
                 "lines": [{ "time_sec": 5.0, "text": "Neon lights" }]
+            }),
+            &pb,
+            &lib,
+            &storage,
+        );
+        let tr_cmds = host.dispatch_action(
+            "openify.lyrics",
+            "toggle_trans",
+            serde_json::Value::Bool(true),
+            &pb,
+            &lib,
+            &storage,
+        );
+        assert!(tr_cmds
+            .iter()
+            .any(|(_, c)| matches!(c, ExtHostCommand::LyricsTranslate { target_lang, .. } if target_lang == "en")));
+        let _ = host.dispatch_event_to_ext(
+            "openify.lyrics",
+            "lyricsTranslated",
+            serde_json::json!({
+                "path": "/tmp/night.mp3",
+                "target_lang": "en",
+                "detected_lang": "en",
+                "provider": "Google Translate",
+                "translations": ["Neon lights"]
             }),
             &pb,
             &lib,

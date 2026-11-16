@@ -12,11 +12,12 @@ local SCENES = {
     { id = "wave",      label = "Wave" },
     { id = "circle",    label = "Circle" },
     { id = "particles", label = "Particles" },
+    { id = "gif",       label = "GIF Shower" },
 }
 
 local function sync_mini_viz()
     local mini_mode = "bars"
-    if st.scene == "wave" or st.scene == "circle" or st.scene == "flame" then
+    if st.scene == "wave" or st.scene == "circle" or st.scene == "flame" or st.scene == "gif" then
         mini_mode = st.scene
     end
     tntron.ui.set_layout_config({
@@ -47,13 +48,18 @@ local function render(pb)
         table.insert(btns, tntron.ui.button("sc:" .. sc.id, sc.label, { active = st.scene == sc.id }))
     end
 
+    local subtitle = pb and pb.title ~= "" and (pb.title .. " · " .. (pb.artist or "")) or "Play any track to drive the FFT-reactive canvas."
+    if st.scene == "gif" then
+        subtitle = "Random GIF Shower (/home/arcioth/Pictures/gifs) — switches on each low-frequency bass hit"
+    end
+
     tntron.ui.register_sidebar({
         id = "better-viz",
         label = "Visualizer+",
         icon = "wave",
         widgets = {
             tntron.ui.heading("Stage Scene: " .. st.scene:upper()),
-            tntron.ui.text(pb and pb.title ~= "" and (pb.title .. " · " .. (pb.artist or "")) or "Play any track to drive the FFT-reactive canvas.", true),
+            tntron.ui.text(subtitle, true),
             tntron.ui.visualizer(st.scene, { playing = playing, volume = vol, speed = spd }),
             tntron.ui.row(btns),
             tntron.ui.toggle("mini_toggle", "Show real-time canvas visualizer in player bar", st.player_bar),
@@ -87,7 +93,8 @@ function on_action(_ctx, action_id, val)
             bars = "wave",
             wave = "circle",
             circle = "particles",
-            particles = "flame",
+            particles = "gif",
+            gif = "flame",
         }
         st.scene = order[st.scene] or "flame"
         tntron.storage.set("scene", st.scene)

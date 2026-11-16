@@ -26,18 +26,53 @@ pub fn default_status_path() -> PathBuf {
     }
 }
 
+pub fn default_cover_cache_path() -> PathBuf {
+    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+        PathBuf::from(runtime_dir).join("tntron-cover.img")
+    } else {
+        let uid = unsafe { libc::getuid() };
+        PathBuf::from(format!("/tmp/tntron-cover-{uid}.img"))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PopupTrackItem {
+    pub title: String,
+    pub artist: String,
+    pub duration: f64,
+    pub playlist_index: Option<usize>,
+    pub is_current: bool,
+    pub is_queued: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TntronStatus {
     pub state: String,
     pub title: String,
     pub artist: String,
     pub album: String,
+    #[serde(default)]
+    pub track_path: String,
+    #[serde(default)]
+    pub cover_path: Option<String>,
     pub position: f64,
     pub duration: f64,
     pub volume: f64,
     pub speed: f64,
     pub bpm: Option<f64>,
+    #[serde(default)]
+    pub energy: f64,
+    #[serde(default)]
+    pub bands: [f32; 16],
+    #[serde(default)]
+    pub beat: f32,
     pub lyric: String,
+    #[serde(default)]
+    pub lyrics_window: Vec<String>,
+    #[serde(default)]
+    pub playlist_items: Vec<PopupTrackItem>,
+    #[serde(default)]
+    pub queue_items: Vec<PopupTrackItem>,
     pub loop_mode: String,
     pub shuffle: bool,
     pub dsp_preset: String,
@@ -57,13 +92,38 @@ impl TntronStatus {
             PlayState::Paused => "paused",
             PlayState::Stopped => "stopped",
         };
-        let (title, artist, album) = if let Some(track) = &state.current_track {
-            (track.title.clone(), track.artist.clone(), track.album.clone())
+        let (title, artist, album, track_path) = if let Some(track) = &state.current_track {
+            (
+                track.title.clone(),
+                track.artist.clone(),
+                track.album.clone(),
+                track.path.display().to_string(),
+            )
         } else {
-            ("No Track".into(), String::new(), String::new())
+            ("No Track".into(), String::new(), String::new(), String::new())
         };
         let pos = state.clock.now();
         let dur = state.duration_sec;
+        let (bands, beat) = if state.play_state == PlayState::Playing {
+            state
+                .active_analysis
+                .as_ref()
+                .map(|a| a.sample_at(pos * state.speed))
+                .unwrap_or(([0.0; 16], 0.0))
+        } else {
+            ([0.0; 16], 0.0)
+        };
+        let energy = state
+            .active_analysis
+            .as_ref()
+            .map(|a| a.energy)
+            .unwrap_or(0.0);
+        let cover_path = state
+            .cover_cache_path
+            .as_ref()
+            .filter(|p| p.is_file())
+            .map(|p| p.display().to_string());
+        let lyrics_window = state.current_lyrics_window();
         let percentage = if dur > 0.0 {
             ((pos / dur) * 100.0).clamp(0.0, 100.0) as u8
         } else {
@@ -100,17 +160,62 @@ impl TntronStatus {
             "No active track".into()
         };
 
+        let queue_items: Vec<PopupTrackItem> = state
+            .queue
+            .iter()
+            .take(24)
+            .enumerate()
+            .map(|(i, t)| PopupTrackItem {
+                title: t.title.clone(),
+                artist: t.artist.clone(),
+                duration: t.duration_sec,
+                playlist_index: Some(i),
+                is_current: false,
+                is_queued: true,
+            })
+            .collect();
+
+        let pl_len = state.active_playlist.len();
+        let start_idx = state
+            .active_playlist_index
+            .map(|i| i.saturating_sub(2))
+            .unwrap_or(0)
+            .min(pl_len.saturating_sub(24));
+        let playlist_items: Vec<PopupTrackItem> = state
+            .active_playlist
+            .iter()
+            .enumerate()
+            .skip(start_idx)
+            .take(24)
+            .map(|(i, t)| PopupTrackItem {
+                title: t.title.clone(),
+                artist: t.artist.clone(),
+                duration: t.duration_sec,
+                playlist_index: Some(i),
+                is_current: state.active_playlist_index == Some(i),
+                is_queued: false,
+            })
+            .collect();
+
         Self {
             state: state_str.into(),
             title,
             artist,
             album,
+            track_path,
+            cover_path,
             position: (pos * 10.0).round() / 10.0,
             duration: (dur * 10.0).round() / 10.0,
             volume: state.volume,
             speed: state.speed,
             bpm,
+            energy,
+            bands,
+            beat,
             lyric,
+            lyrics_window,
+            playlist_items,
+            queue_items,
             loop_mode: state.loop_mode.label().into(),
             shuffle: state.shuffle_mode == crate::clock::ShuffleMode::On,
             dsp_preset: state.persisted.dsp.preset.label().into(),
@@ -153,6 +258,8 @@ pub enum IpcCommand {
     Sleep { minutes: Option<u64> },
     CycleLoop,
     Shuffle,
+    PlayUpcoming { index: usize },
+    PlayQueueItem { index: usize },
     Status,
     Subscribe,
 }
@@ -253,6 +360,8 @@ async fn handle_client(
             IpcCommand::Sleep { minutes } => Some(CoreCommand::SetSleepTimer(minutes)),
             IpcCommand::CycleLoop => Some(CoreCommand::CycleLoopMode),
             IpcCommand::Shuffle => Some(CoreCommand::ToggleShuffle),
+            IpcCommand::PlayUpcoming { index } => Some(CoreCommand::PlayUpcomingIndex(index)),
+            IpcCommand::PlayQueueItem { index } => Some(CoreCommand::PlayQueueItem(index)),
             IpcCommand::Status | IpcCommand::Subscribe => None,
             _ => None,
         };

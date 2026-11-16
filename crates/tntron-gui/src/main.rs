@@ -1,5 +1,9 @@
 mod app;
+mod button_style;
+mod gif_viz;
 mod icons;
+mod logo;
+mod reactive_bg;
 mod theme;
 mod ui_widgets;
 mod visualizer;
@@ -183,15 +187,27 @@ fn main() -> iced::Result {
         }
     }
 
+    let start_fullscreen = args.iter().any(|a| a == "--fullscreen" || a == "-f");
+    let force_x11 = args.iter().any(|a| a == "--x11");
+    let force_wayland = args.iter().any(|a| a == "--wayland");
+    let force_opaque = args.iter().any(|a| a == "--opaque")
+        || std::env::var("TNTRON_OPAQUE").is_ok_and(|v| v == "1");
+
+    if force_x11 && !force_wayland {
+        std::env::set_var("WINIT_UNIX_BACKEND", "x11");
+    } else if force_wayland && !force_x11 {
+        std::env::set_var("WINIT_UNIX_BACKEND", "wayland");
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter("tntron=info,tntron_core=info")
         .init();
 
-    let dir_arg = args.first().map(|s| s.as_str());
+    let dir_arg = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
     let music_root = resolve_music_dir(dir_arg);
 
     iced::application(
-        move || TntronApp::boot(music_root.clone()),
+        move || TntronApp::boot(music_root.clone(), start_fullscreen),
         TntronApp::update,
         TntronApp::view,
     )
@@ -199,6 +215,15 @@ fn main() -> iced::Result {
     .title(TntronApp::title)
     .theme(TntronApp::theme)
     .subscription(TntronApp::subscription)
-    .window_size(Size::new(1220.0, 780.0))
+    .window(iced::window::Settings {
+        size: Size::new(1220.0, 780.0),
+        transparent: !force_opaque,
+        icon: logo::window_icon(),
+        platform_specific: iced::window::settings::PlatformSpecific {
+            application_id: "tntron".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
     .run()
 }

@@ -1,0 +1,11 @@
+{
+  "id": "tntron.button-packs",
+  "name": "Button Packs & Customizer",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Customize every button and clickable element (Openify, Windows XP, Liquid Glass, Cyberpunk) with per-corner rounding/cropping, hues, outlines, inline glow, bevel emboss, gradients, hover reactions, and .tnt copy/paste sharing.",
+  "author": "tntron",
+  "main": "main.lua",
+  "permissions": ["ui:sidebar", "storage", "notify"],
+  "requires": []
+}

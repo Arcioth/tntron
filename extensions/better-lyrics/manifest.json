@@ -1,11 +1,11 @@
 {
   "id": "openify.better-lyrics",
   "name": "Better Lyrics",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "api_version": "1.0",
-  "description": "Adds per-track lyric time offset adjustment, quick sync nudge, and live active lyric line in the player bar.",
+  "description": "Adds per-track lyric time offset adjustment, quick sync nudge, multi-provider lookup, live translation, and active lyric line in the player bar.",
   "author": "Openify + tntron",
   "main": "main.lua",
-  "permissions": ["playback:read", "playback:control", "library:read", "ui:sidebar", "ui:player_widget", "storage"],
+  "permissions": ["playback:read", "playback:control", "library:read", "network", "ui:sidebar", "ui:player_widget", "storage"],
   "requires": ["openify.lyrics"]
 }

@@ -1,3 +1,5 @@
+mod popup;
+
 use anyhow::{Context, Result};
 use tntron_core::{default_socket_path, IpcCommand, IpcResponse, TntronStatus};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -9,6 +11,10 @@ async fn main() -> Result<()> {
     if args.is_empty() {
         print_usage();
         return Ok(());
+    }
+
+    if args[0] == "popup" {
+        return popup::run_popup_tui().await;
     }
 
     let waybar = args.first().map(|s| s.as_str()) == Some("waybar");
@@ -113,6 +119,6 @@ async fn main() -> Result<()> {
 
 fn print_usage() {
     eprintln!(
-        "tntron-ctl <play|pause|toggle|next|prev|stop|mute|volume <v|+d>|seek <s|+d>|speed <x>|status|waybar [--follow]>"
+        "tntron-ctl <play|pause|toggle|next|prev|stop|mute|volume <v|+d>|seek <s|+d>|speed <x>|status|waybar [--follow]|popup>"
     );
 }

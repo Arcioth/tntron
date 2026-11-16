@@ -49,11 +49,40 @@ pub fn parse_lrc(input: &str) -> Vec<LyricLine> {
 fn parse_timestamp(tag: &str) -> Option<f64> {
     let (mins_str, sec_str) = tag.split_once(':')?;
     let mins: f64 = mins_str.trim().parse().ok()?;
-    let secs: f64 = sec_str.trim().parse().ok()?;
+    let secs: f64 = if let Some((whole, frac)) = sec_str.trim().split_once(':') {
+        format!("{whole}.{frac}").parse().ok()?
+    } else {
+        sec_str.trim().parse().ok()?
+    };
     if mins < 0.0 || secs < 0.0 {
         return None;
     }
     Some(mins * 60.0 + secs)
+}
+
+/// Converts plain multi-line lyrics into evenly paced timed lines for display & scrolling.
+pub fn plain_text_to_timed_lines(plain: &str, duration_sec: f64) -> Vec<LyricLine> {
+    let raw_lines: Vec<&str> = plain
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if raw_lines.is_empty() {
+        return Vec::new();
+    }
+    let step = if duration_sec > 8.0 {
+        ((duration_sec * 0.88) / raw_lines.len() as f64).clamp(2.2, 6.0)
+    } else {
+        3.0
+    };
+    raw_lines
+        .into_iter()
+        .enumerate()
+        .map(|(idx, text)| LyricLine {
+            time_sec: (idx as f64) * step,
+            text: text.to_string(),
+        })
+        .collect()
 }
 
 /// Loads a companion `.lrc` file adjacent to the given audio file, if present.

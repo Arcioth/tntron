@@ -1,0 +1,25 @@
+[Desktop Entry]
+Type=Application
+Name=tntron
+GenericName=Music Player
+Comment=GPU-native music workstation powered by Rust, iced, mpv, and sandboxed Lua extensions
+Exec=tntron %F
+Icon=tntron
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+MimeType=audio/mpeg;audio/flac;audio/ogg;audio/opus;audio/wav;audio/aac;audio/mp4;audio/x-m4a;audio/x-flac;
+StartupNotify=true
+StartupWMClass=tntron
+Actions=Fullscreen;X11;Wayland;
+
+[Desktop Action Fullscreen]
+Name=Open in Fullscreen
+Exec=tntron --fullscreen
+
+[Desktop Action X11]
+Name=Launch with X11 Backend
+Exec=tntron --x11
+
+[Desktop Action Wayland]
+Name=Launch with Wayland Backend
+Exec=tntron --wayland

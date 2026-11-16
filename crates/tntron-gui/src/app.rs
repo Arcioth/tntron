@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::stream;
 use iced::alignment::Vertical;
+use iced::clipboard;
 use iced::event::{self, Event, Status};
 use iced::keyboard::{self, key::Named, Key};
 use iced::mouse;
@@ -14,24 +15,29 @@ use iced::widget::{
 };
 use iced::window;
 use iced::{
-    time as iced_time, Alignment, Background, Border, Color, Element, Length, Padding, Point, Size,
-    Subscription, Task, Theme,
+    time as iced_time, Alignment, Background, Border, Color, ContentFit, Element, Length, Padding,
+    Point, Size, Subscription, Task, Theme,
 };
 use tntron_core::{
-    format_mmss, run_core_runtime, BrowserEntry, CoreCommand, CoreUpdate, ExtWidget, LoopMode,
+    default_tnt_dir, format_mmss, list_tnt_files, run_core_runtime, BrowserEntry, ButtonPackConfig,
+    CoreCommand, CoreUpdate, DiscordRpcConfig, ExtSidebarTab, ExtWidget, LinuxDisplayEnv, LoopMode,
     PlayState, ShuffleMode, TrackSort, UiSnapshot,
 };
 use tokio::sync::mpsc;
 
+use crate::button_style;
+use crate::gif_viz::GifPlayer;
 use crate::icons::{self, resolve_icon};
-use crate::theme::{all_themes, resolve_theme, ThemeSpec};
+use crate::logo;
+use crate::reactive_bg::{custom_bg_canvas, reactive_bg_canvas, ReactiveBgState};
+use crate::theme::{all_themes, parse_hex_color, resolve_theme, ThemeSpec};
 use crate::ui_widgets::{
     card_box, compact_nav_button, context_menu_item, context_menu_panel, folder_sidebar_item,
     glyph_button, openify_panel, pill_button, pill_icon_button, play_circle_button,
     primary_pill_icon_button, render_ext_widget, sidebar_nav_item, slot_badge,
-    sort_header_button, theme_swatch_circle, track_monogram_tile, track_row_button,
+    sort_header_button, theme_swatch_circle, track_monogram_tile, track_row_button, ExtVizCtx,
 };
-use crate::visualizer::{mini_visualizer_canvas, VizFrameData};
+use crate::visualizer::{mini_visualizer_canvas, visualizer_canvas, VizFrameData};
 
 #[derive(Debug, Clone)]
 enum ModalState {
@@ -133,6 +139,9 @@ pub enum Message {
     SetTheme(String),
     ExportPreferences,
     ImportPreferences,
+    TntBundleDraftChanged(String),
+    ExportFullTnt(String),
+    ImportFullTnt(String),
     ToggleFavorite(PathBuf),
     AddToQueue(PathBuf),
     PlayNextInQueue(PathBuf),
@@ -195,6 +204,8 @@ pub enum Message {
     },
     DismissToast(u64),
     VizTick,
+    NextGifViz,
+    ToggleHomePlus,
     StepSpeed(f64),
     SetSpeedDirect(f64),
     StepPitch(f64),
@@ -216,6 +227,32 @@ pub enum Message {
     CyclePlayerVizMode,
     SetToastZone(String),
     ResetLayoutConfig,
+    ToggleHideUi,
+    ToggleDiscordFlag(&'static str),
+    SetDiscordOption(&'static str, String),
+    DiscordFieldChanged(&'static str, String),
+    ApplyDiscordFields,
+    ReconnectDiscordRpc,
+    ResetDiscordRpc,
+    FontLoaded(Result<(), iced::font::Error>),
+    ToggleProfilePopover,
+    CloseProfilePopover,
+    ProfileNameDraftChanged(String),
+    SubmitProfileName,
+    ProfileAvatarDraftChanged(String),
+    SubmitProfileAvatar,
+    ClearProfileAvatar,
+    SetProfileAvatarSize(f32),
+    SetProfileAvatarShape(String),
+    SetProfileAvatarFit(String),
+    CopyProfileStatsTnt,
+    PasteProfileStatsClipboard,
+    ProfileShareDraftChanged(String),
+    ImportProfileStatsTnt(String),
+    ResetProfileStats,
+    ResolvePendingProfileImport(bool),
+    ToggleFullscreen,
+    SetFullscreen(bool),
     KeyPressed(Key),
     WindowCloseRequested,
 }
@@ -225,6 +262,31 @@ pub struct TntronApp {
     snapshot: Option<UiSnapshot>,
     cover_handle: Option<image::Handle>,
     last_cover_ptr: Option<usize>,
+    custom_bg_path: Option<String>,
+    custom_bg_handle: Option<image::Handle>,
+    custom_particle_path: Option<String>,
+    custom_particle_handle: Option<image::Handle>,
+    custom_logo_path: Option<String>,
+    custom_logo_handle: Option<image::Handle>,
+    custom_font_path: Option<String>,
+    avatar_path: Option<String>,
+    avatar_handle: Option<image::Handle>,
+    profile_popover_open: bool,
+    profile_name_draft: String,
+    profile_avatar_draft: String,
+    profile_share_draft: String,
+    profile_drafts_synced: bool,
+    discord_drafts_synced: bool,
+    discord_client_id_draft: String,
+    discord_idle_draft: String,
+    discord_details_draft: String,
+    discord_state_draft: String,
+    discord_large_key_draft: String,
+    discord_large_text_draft: String,
+    discord_small_key_draft: String,
+    discord_small_text_draft: String,
+    discord_btn_label_draft: String,
+    discord_btn_url_draft: String,
     card_covers: HashMap<PathBuf, (usize, image::Handle)>,
     active_view: ActiveView,
     queue_open: bool,
@@ -246,6 +308,9 @@ pub struct TntronApp {
     viz_phase: f32,
     viz_bands: [f32; 16],
     viz_beat: f32,
+    gif_viz: GifPlayer,
+    reactive_bg: ReactiveBgState,
+    home_plus_open: bool,
     pos_anchor_sec: f64,
     pos_anchor_time: Instant,
     edit_layout_open: bool,
@@ -254,10 +319,13 @@ pub struct TntronApp {
     preset_name_draft: String,
     ext_search: String,
     ext_compact_cards: bool,
+    tnt_bundle_draft: String,
+    is_fullscreen: bool,
+    display_env: LinuxDisplayEnv,
 }
 
 impl TntronApp {
-    pub fn boot(music_root: PathBuf) -> (Self, Task<Message>) {
+    pub fn boot(music_root: PathBuf, start_fullscreen: bool) -> (Self, Task<Message>) {
         let (cmd_tx, cmd_rx) = mpsc::channel::<CoreCommand>(128);
         let (ui_tx, ui_rx) = mpsc::channel::<CoreUpdate>(64);
 
@@ -275,6 +343,31 @@ impl TntronApp {
             snapshot: None,
             cover_handle: None,
             last_cover_ptr: None,
+            custom_bg_path: None,
+            custom_bg_handle: None,
+            custom_particle_path: None,
+            custom_particle_handle: None,
+            custom_logo_path: None,
+            custom_logo_handle: None,
+            custom_font_path: None,
+            avatar_path: None,
+            avatar_handle: None,
+            profile_popover_open: false,
+            profile_name_draft: String::new(),
+            profile_avatar_draft: String::new(),
+            profile_share_draft: String::new(),
+            profile_drafts_synced: false,
+            discord_drafts_synced: false,
+            discord_client_id_draft: String::new(),
+            discord_idle_draft: String::new(),
+            discord_details_draft: String::new(),
+            discord_state_draft: String::new(),
+            discord_large_key_draft: String::new(),
+            discord_large_text_draft: String::new(),
+            discord_small_key_draft: String::new(),
+            discord_small_text_draft: String::new(),
+            discord_btn_label_draft: String::new(),
+            discord_btn_url_draft: String::new(),
             card_covers: HashMap::new(),
             active_view: ActiveView::Home,
             queue_open: false,
@@ -296,6 +389,9 @@ impl TntronApp {
             viz_phase: 0.0,
             viz_bands: [0.0; 16],
             viz_beat: 0.0,
+            gif_viz: GifPlayer::new(),
+            reactive_bg: ReactiveBgState::new(),
+            home_plus_open: true,
             pos_anchor_sec: 0.0,
             pos_anchor_time: Instant::now(),
             edit_layout_open: false,
@@ -304,9 +400,19 @@ impl TntronApp {
             preset_name_draft: String::new(),
             ext_search: String::new(),
             ext_compact_cards: true,
+            tnt_bundle_draft: "tntron_full_backup".to_string(),
+            is_fullscreen: start_fullscreen,
+            display_env: LinuxDisplayEnv::detect(),
         };
 
-        (app, Task::stream(core_stream))
+        let mut tasks = vec![Task::stream(core_stream)];
+        if start_fullscreen {
+            tasks.push(
+                window::latest()
+                    .and_then(|id| window::set_mode(id, window::Mode::Fullscreen)),
+            );
+        }
+        (app, Task::batch(tasks))
     }
 
     fn viz_frame(&self) -> VizFrameData {
@@ -321,11 +427,318 @@ impl TntronApp {
         let _ = self.cmd_tx.try_send(cmd);
     }
 
+    fn sync_discord_drafts(&mut self, cfg: &DiscordRpcConfig) {
+        self.discord_client_id_draft = cfg.client_id.clone();
+        self.discord_idle_draft = cfg.idle_text.clone();
+        self.discord_details_draft = cfg.custom_details.clone();
+        self.discord_state_draft = cfg.custom_state.clone();
+        self.discord_large_key_draft = cfg.large_image_key.clone();
+        self.discord_large_text_draft = cfg.large_text.clone();
+        self.discord_small_key_draft = cfg.small_image_key.clone();
+        self.discord_small_text_draft = cfg.small_text.clone();
+        self.discord_btn_label_draft = cfg.button_label.clone();
+        self.discord_btn_url_draft = cfg.button_url.clone();
+    }
+
+    fn view_discord_rpc_card<'a>(
+        &'a self,
+        snap: &'a UiSnapshot,
+        theme: &ThemeSpec,
+    ) -> Element<'a, Message> {
+        let dc = &snap.discord_rpc;
+        let prev = &snap.discord_preview;
+
+        let flag_chip = |label: &'static str, on: bool, key: &'static str| {
+            pill_button(
+                format!("{label}: {}", if on { "ON" } else { "OFF" }),
+                theme,
+                on,
+                Message::ToggleDiscordFlag(key),
+            )
+        };
+
+        let status_txt = if !dc.enabled {
+            "Disabled".to_string()
+        } else if prev.connected {
+            format!(
+                "Connected ({})",
+                prev.socket_label.as_deref().unwrap_or("discord-ipc-0")
+            )
+        } else {
+            "Waiting for Discord / Vesktop IPC socket".to_string()
+        };
+
+        let preview_box = card_box(
+            column![
+                text("Live Discord Rich Presence Preview")
+                    .size(11)
+                    .color(theme.accent),
+                text(if prev.details.is_empty() {
+                    "(No Details)"
+                } else {
+                    prev.details.as_str()
+                })
+                .size(13)
+                .color(theme.text),
+                text(if prev.state.is_empty() {
+                    "(No State)"
+                } else {
+                    prev.state.as_str()
+                })
+                .size(12)
+                .color(theme.muted),
+                text(&prev.footer).size(11).color(theme.muted),
+            ]
+            .spacing(3)
+            .padding(10),
+            theme,
+            prev.connected,
+        )
+        .width(Length::Fill);
+
+        let field_input = |label: &'static str, field: &'static str, value: &str, placeholder: &'static str| {
+            row![
+                container(text(label).size(11).color(theme.muted)).width(Length::Fixed(128.0)),
+                text_input(placeholder, value)
+                    .on_input(move |s| Message::DiscordFieldChanged(field, s))
+                    .on_submit(Message::ApplyDiscordFields)
+                    .size(12)
+                    .padding([5, 9])
+                    .width(Length::Fill),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+        };
+
+        card_box(
+            column![
+                row![
+                    column![
+                        text("Discord Rich Presence").size(16).color(theme.text),
+                        text(format!("Status: {status_txt}"))
+                            .size(12)
+                            .color(if prev.connected { theme.accent } else { theme.muted }),
+                    ]
+                    .spacing(3),
+                    space::horizontal(),
+                    flag_chip("Rich Presence", dc.enabled, "enabled"),
+                    pill_icon_button(
+                        "Reconnect",
+                        Some(icons::REFRESH),
+                        theme,
+                        false,
+                        Message::ReconnectDiscordRpc,
+                    ),
+                    pill_icon_button(
+                        "Reset",
+                        Some(icons::CLOSE),
+                        theme,
+                        false,
+                        Message::ResetDiscordRpc,
+                    ),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+                preview_box,
+                text("Visible Details & Telemetry").size(12).color(theme.muted),
+                row![
+                    flag_chip("Title", dc.show_title, "title"),
+                    flag_chip("Artist", dc.show_artist, "artist"),
+                    flag_chip("Album", dc.show_album, "album"),
+                    flag_chip("Timestamps", dc.show_timestamps, "timestamps"),
+                    flag_chip("Paused Badge", dc.show_paused, "paused"),
+                    flag_chip("Clear on Pause", dc.clear_on_pause, "clear_on_pause"),
+                    flag_chip("Codec / Rate", dc.show_codec, "codec"),
+                    flag_chip("BPM", dc.show_bpm, "bpm"),
+                    flag_chip("Speed / Pitch", dc.show_speed_pitch, "speed_pitch"),
+                    flag_chip("Loop / Shuffle", dc.show_loop_shuffle, "loop_shuffle"),
+                    flag_chip("Track # / Queue", dc.show_queue_info, "queue"),
+                    flag_chip("Idle Status", dc.show_idle, "idle"),
+                    flag_chip("Action Button", dc.show_button, "button"),
+                    flag_chip("Privacy Mode", dc.privacy_mode, "privacy"),
+                ]
+                .spacing(6)
+                .wrap(),
+                row![
+                    text("Activity Type:").size(11).color(theme.muted),
+                    pill_button("Listening", theme, dc.activity_type == 2, Message::SetDiscordOption("activity_type", "2".into())),
+                    pill_button("Playing", theme, dc.activity_type == 0, Message::SetDiscordOption("activity_type", "0".into())),
+                    pill_button("Watching", theme, dc.activity_type == 3, Message::SetDiscordOption("activity_type", "3".into())),
+                    text("·  Timer:").size(11).color(theme.muted),
+                    pill_button("Remaining", theme, dc.timestamp_mode == "remaining", Message::SetDiscordOption("timestamp_mode", "remaining".into())),
+                    pill_button("Elapsed", theme, dc.timestamp_mode == "elapsed", Message::SetDiscordOption("timestamp_mode", "elapsed".into())),
+                    pill_button("Off", theme, dc.timestamp_mode == "none", Message::SetDiscordOption("timestamp_mode", "none".into())),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .wrap(),
+                row![
+                    text("Details Format:").size(11).color(theme.muted),
+                    pill_button("Auto (Full)", theme, dc.details_mode == "auto", Message::SetDiscordOption("details_mode", "auto".into())),
+                    pill_button("Title Only", theme, dc.details_mode == "title_only", Message::SetDiscordOption("details_mode", "title_only".into())),
+                    pill_button("Title — Artist", theme, dc.details_mode == "title_artist", Message::SetDiscordOption("details_mode", "title_artist".into())),
+                    pill_button("Custom", theme, dc.details_mode == "custom", Message::SetDiscordOption("details_mode", "custom".into())),
+                    text("·  State Format:").size(11).color(theme.muted),
+                    pill_button("Auto (Full)", theme, dc.state_mode == "auto", Message::SetDiscordOption("state_mode", "auto".into())),
+                    pill_button("Artist · Album", theme, dc.state_mode == "artist_album", Message::SetDiscordOption("state_mode", "artist_album".into())),
+                    pill_button("Telemetry", theme, dc.state_mode == "telemetry", Message::SetDiscordOption("state_mode", "telemetry".into())),
+                    pill_button("Custom", theme, dc.state_mode == "custom", Message::SetDiscordOption("state_mode", "custom".into())),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .wrap(),
+                text("Placeholders for custom templates: {title} {artist} {album} {codec} {bpm} {speed} {pitch} {queue} {loop} {shuffle} {state}")
+                    .size(11)
+                    .color(theme.muted),
+                column![
+                    field_input("Client App ID", "client_id", &self.discord_client_id_draft, "1306739184569253928"),
+                    field_input("Custom Details", "custom_details", &self.discord_details_draft, "{title} · {bpm}"),
+                    field_input("Custom State", "custom_state", &self.discord_state_draft, "{artist} · {album} · {codec}"),
+                    field_input("Idle Text", "idle_text", &self.discord_idle_draft, "Browsing library · Idle"),
+                    field_input("Large Asset Key", "large_key", &self.discord_large_key_draft, "tntron_logo"),
+                    field_input("Large Tooltip", "large_text", &self.discord_large_text_draft, "{album} · {codec}"),
+                    field_input("Small Asset Key", "small_key", &self.discord_small_key_draft, "tntron_play"),
+                    field_input("Small Tooltip", "small_text", &self.discord_small_text_draft, "{state} · {speed}"),
+                    field_input("Button Label", "button_label", &self.discord_btn_label_draft, "tntron on GitHub"),
+                    field_input("Button URL", "button_url", &self.discord_btn_url_draft, "https://github.com/Arcioth/tntron"),
+                ]
+                .spacing(6),
+                row![
+                    primary_pill_icon_button(
+                        "Apply Discord Fields",
+                        Some(icons::GLOBE),
+                        theme,
+                        Message::ApplyDiscordFields,
+                    ),
+                ]
+                .spacing(8),
+            ]
+            .spacing(10)
+            .padding(16),
+            theme,
+            false,
+        )
+        .width(Length::Fill)
+        .into()
+    }
+
+    fn resolve_logo_tint(&self, snap: &UiSnapshot, theme: &ThemeSpec) -> Color {
+        match snap.logo.mode.as_str() {
+            "monochrome" => theme.text,
+            "custom_color" => snap
+                .logo
+                .custom_hex
+                .as_deref()
+                .and_then(parse_hex_color)
+                .unwrap_or(theme.logo_color),
+            _ => theme.logo_color,
+        }
+    }
+
+    fn view_brand_logo<'a>(
+        &'a self,
+        snap: &'a UiSnapshot,
+        theme: &ThemeSpec,
+        override_size: Option<f32>,
+    ) -> Element<'a, Message> {
+        let base_sz = override_size.unwrap_or(snap.logo.size_px).clamp(14.0, 96.0);
+        let beat_boost = if snap.logo.beat_pulse && snap.play_state == PlayState::Playing {
+            self.viz_beat * if override_size.is_some() { 4.0 } else { 2.2 }
+        } else {
+            0.0
+        };
+        let sz = base_sz + beat_boost;
+        let tint = self.resolve_logo_tint(snap, theme);
+
+        let is_custom_img =
+            snap.logo.mode == "custom_image" && self.custom_logo_handle.is_some();
+        let handle = if is_custom_img {
+            self.custom_logo_handle.clone()
+        } else {
+            logo::cached_tinted_logo_handle(tint)
+        };
+
+        let mark: Element<'a, Message> = if let (true, Some(h)) = (snap.logo.enabled, handle) {
+            let w = if is_custom_img { sz } else { sz * 1.125 };
+            image(h)
+                .width(Length::Fixed(w))
+                .height(Length::Fixed(sz))
+                .content_fit(ContentFit::Contain)
+                .into()
+        } else {
+            icons::icon(icons::MUSIC, (base_sz * 0.8).max(14.0), tint).into()
+        };
+
+        let frame_style = snap.logo.frame_style.as_str();
+        if override_size.is_none() && frame_style != "clean" {
+            let bg = theme.card;
+            let border_col = if frame_style == "glow" {
+                tint
+            } else {
+                theme.border
+            };
+            let glow_shadow = if frame_style == "glow" {
+                iced::Shadow {
+                    color: Color { a: 0.55, ..tint },
+                    offset: iced::Vector::ZERO,
+                    blur_radius: 12.0,
+                }
+            } else {
+                iced::Shadow::default()
+            };
+            container(mark)
+                .padding([4, 6])
+                .center_x(Length::Shrink)
+                .center_y(Length::Shrink)
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(bg)),
+                    border: Border {
+                        color: border_col,
+                        width: 1.0,
+                        radius: 8.0.into(),
+                    },
+                    shadow: glow_shadow,
+                    ..Default::default()
+                })
+                .into()
+        } else {
+            mark
+        }
+    }
+
     fn current_theme(&self) -> ThemeSpec {
         let Some(snap) = &self.snapshot else {
             return resolve_theme("openify", &[]);
         };
-        resolve_theme(&snap.active_theme, &snap.ext_themes)
+        let mut spec = resolve_theme(&snap.active_theme, &snap.ext_themes);
+        if snap.reactive_ui.enabled {
+            let dim = snap.reactive_ui.bg_dim.clamp(0.25, 0.96);
+            spec.surface.a = (0.48 + dim * 0.42).clamp(0.42, 0.92);
+            spec.card.a = (0.56 + dim * 0.36).clamp(0.48, 0.95);
+            spec.card_hover.a = (0.68 + dim * 0.28).clamp(0.60, 0.96);
+        }
+        if snap.transparency.enabled {
+            let tr = &snap.transparency;
+            if let Some(hex) = &tr.tint_hex {
+                if let Some(c) = crate::theme::parse_hex_color(hex) {
+                    spec.base = Color {
+                        r: c.r,
+                        g: c.g,
+                        b: c.b,
+                        a: spec.base.a,
+                    };
+                }
+            }
+            spec.base.a = tr.base_alpha.clamp(0.0, 1.0);
+            spec.surface.a = (spec.surface.a * tr.surface_alpha).clamp(0.0, 1.0);
+            spec.card.a = (spec.card.a * tr.card_alpha).clamp(0.0, 1.0);
+            spec.card_hover.a = (spec.card_hover.a * (tr.card_alpha + 0.08).min(1.0)).clamp(0.0, 1.0);
+            spec.sidebar.a = tr.player_bar_alpha.clamp(0.0, 1.0);
+            spec.accent.a = tr.accent_alpha.clamp(0.1, 1.0);
+            spec.text.a = tr.text_alpha.clamp(0.15, 1.0);
+            spec.muted.a = (tr.text_alpha * 0.85).clamp(0.12, 1.0);
+        }
+        spec
     }
 
     pub fn title(&self) -> String {
@@ -349,19 +762,72 @@ impl TntronApp {
         let Some(snap) = &self.snapshot else {
             return false;
         };
-        let has_viz = |widgets: &[ExtWidget]| -> bool {
-            widgets
-                .iter()
-                .any(|w| matches!(w, ExtWidget::Visualizer { .. }))
-        };
+        fn contains_viz(widgets: &[ExtWidget]) -> bool {
+            widgets.iter().any(|w| match w {
+                ExtWidget::Visualizer { .. } => true,
+                ExtWidget::Row { children } | ExtWidget::Grid { children, .. } => {
+                    contains_viz(children)
+                }
+                _ => false,
+            })
+        }
         match &self.active_view {
-            ActiveView::Extension { ext_id, tab_id } => snap
-                .ext_sidebar_tabs
+            ActiveView::Extension { ext_id, tab_id } => {
+                let base_has = snap
+                    .ext_sidebar_tabs
+                    .iter()
+                    .find(|t| &t.ext_id == ext_id && &t.id == tab_id)
+                    .is_some_and(|t| contains_viz(&t.widgets));
+                let overlay_has = overlays_for_ext_tab(&snap.ext_sidebar_tabs, ext_id)
+                    .iter()
+                    .any(|t| contains_viz(&t.widgets));
+                base_has || overlay_has
+            }
+            ActiveView::Settings => snap
+                .ext_settings_panels
                 .iter()
-                .find(|t| &t.ext_id == ext_id && &t.id == tab_id)
-                .is_some_and(|t| has_viz(&t.widgets)),
-            ActiveView::Settings => snap.ext_settings_panels.iter().any(|p| has_viz(&p.widgets)),
-            ActiveView::Home => false,
+                .any(|p| contains_viz(&p.widgets)),
+            ActiveView::Home => overlays_for_home(&snap.ext_sidebar_tabs)
+                .iter()
+                .any(|t| contains_viz(&t.widgets)),
+        }
+    }
+
+    fn is_gif_viz_visible(&self) -> bool {
+        let Some(snap) = &self.snapshot else {
+            return false;
+        };
+        if snap.layout.show_player_viz && snap.layout.player_viz_mode.eq_ignore_ascii_case("gif") {
+            return true;
+        }
+        fn contains_gif_viz(widgets: &[ExtWidget]) -> bool {
+            widgets.iter().any(|w| match w {
+                ExtWidget::Visualizer { mode, .. } => mode.trim().eq_ignore_ascii_case("gif"),
+                ExtWidget::Row { children } | ExtWidget::Grid { children, .. } => {
+                    contains_gif_viz(children)
+                }
+                _ => false,
+            })
+        }
+        match &self.active_view {
+            ActiveView::Extension { ext_id, tab_id } => {
+                let base_has = snap
+                    .ext_sidebar_tabs
+                    .iter()
+                    .find(|t| &t.ext_id == ext_id && &t.id == tab_id)
+                    .is_some_and(|t| contains_gif_viz(&t.widgets));
+                let overlay_has = overlays_for_ext_tab(&snap.ext_sidebar_tabs, ext_id)
+                    .iter()
+                    .any(|t| contains_gif_viz(&t.widgets));
+                base_has || overlay_has
+            }
+            ActiveView::Settings => snap
+                .ext_settings_panels
+                .iter()
+                .any(|p| contains_gif_viz(&p.widgets)),
+            ActiveView::Home => overlays_for_home(&snap.ext_sidebar_tabs)
+                .iter()
+                .any(|t| contains_gif_viz(&t.widgets)),
         }
     }
 
@@ -370,7 +836,13 @@ impl TntronApp {
             return false;
         };
         let playing_mini = snap.play_state == PlayState::Playing && snap.layout.show_player_viz;
-        playing_mini || self.has_active_visualizer()
+        let hide_stage_anim = snap.play_state == PlayState::Playing
+            && is_ui_hidden(snap)
+            && (snap.transparency.keep_effects || snap.transparency.keep_visualizer);
+        let reactive_active = snap.reactive_ui.enabled
+            && (snap.play_state == PlayState::Playing
+                || matches!(&self.active_view, ActiveView::Extension { ext_id, .. } if ext_id == "tntron.reactive-ui"));
+        playing_mini || hide_stage_anim || reactive_active || self.has_active_visualizer()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -427,6 +899,116 @@ impl TntronApp {
 
                 self.density = ViewDensity::from_str(&snap.view_density);
 
+                let wanted_bg = if snap.transparency.enabled && snap.transparency.bg_mode == "image" {
+                    snap.transparency
+                        .bg_image_path
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(ToString::to_string)
+                } else {
+                    None
+                };
+                if wanted_bg != self.custom_bg_path {
+                    self.custom_bg_handle = wanted_bg.as_deref().and_then(decode_any_image_handle);
+                    self.custom_bg_path = wanted_bg;
+                }
+
+                let wanted_sprite = if snap.reactive_ui.enabled
+                    && (snap.reactive_ui.custom_particle_enabled
+                        || snap.reactive_ui.glow_particle_style.eq_ignore_ascii_case("custom_sprite"))
+                {
+                    snap.reactive_ui
+                        .custom_particle_path
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(ToString::to_string)
+                } else {
+                    None
+                };
+                if wanted_sprite != self.custom_particle_path {
+                    self.custom_particle_handle =
+                        wanted_sprite.as_deref().and_then(decode_any_image_handle);
+                    self.custom_particle_path = wanted_sprite;
+                }
+
+                let mut font_task: Option<Task<Message>> = None;
+                let wanted_font = snap
+                    .icon_pack
+                    .font_path
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string);
+                if wanted_font != self.custom_font_path {
+                    self.custom_font_path = wanted_font.clone();
+                    if let Some(fp) = wanted_font {
+                        if let Some((bytes, detected_family)) = icons::load_custom_font_file(&fp) {
+                            let fam = snap
+                                .icon_pack
+                                .font_family
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or(&detected_family);
+                            icons::set_custom_font_family(Some(fam));
+                            font_task = Some(iced::font::load(bytes).map(Message::FontLoaded));
+                        } else {
+                            icons::set_custom_font_family(None);
+                        }
+                    } else {
+                        icons::set_custom_font_family(None);
+                    }
+                } else if let Some(override_fam) = snap
+                    .icon_pack
+                    .font_family
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    if self.custom_font_path.is_some() {
+                        icons::set_custom_font_family(Some(override_fam));
+                    }
+                }
+
+                let wanted_avatar = snap
+                    .profile
+                    .avatar_path
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string);
+                if wanted_avatar != self.avatar_path {
+                    self.avatar_handle = wanted_avatar.as_deref().and_then(decode_any_image_handle);
+                    self.avatar_path = wanted_avatar;
+                }
+
+                let wanted_logo = if snap.logo.mode == "custom_image" {
+                    snap.logo
+                        .custom_path
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(ToString::to_string)
+                } else {
+                    None
+                };
+                if wanted_logo != self.custom_logo_path {
+                    self.custom_logo_handle =
+                        wanted_logo.as_deref().and_then(decode_any_image_handle);
+                    self.custom_logo_path = wanted_logo;
+                }
+                if !self.profile_drafts_synced {
+                    self.profile_name_draft = snap.profile.name.clone();
+                    self.profile_avatar_draft = snap.profile.avatar_path.clone().unwrap_or_default();
+                    self.profile_drafts_synced = true;
+                }
+                if !self.discord_drafts_synced {
+                    self.sync_discord_drafts(&snap.discord_rpc);
+                    self.discord_drafts_synced = true;
+                }
+
                 if let ActiveView::Extension { ext_id, tab_id } = &self.active_view {
                     let still_exists = snap
                         .ext_sidebar_tabs
@@ -439,7 +1021,16 @@ impl TntronApp {
 
                 self.pos_anchor_sec = snap.position_sec;
                 self.pos_anchor_time = Instant::now();
+                let stage_gif_on = is_ui_hidden(&snap)
+                    && snap.transparency.keep_visualizer
+                    && snap.layout.player_viz_mode == "gif";
                 self.snapshot = Some(*snap);
+                if self.is_gif_viz_visible() || stage_gif_on {
+                    self.gif_viz.activate();
+                }
+                if let Some(ft) = font_task {
+                    return ft;
+                }
             }
             Message::Core(CoreUpdate::Tick {
                 position_sec,
@@ -455,7 +1046,38 @@ impl TntronApp {
                 }
             }
             Message::Core(CoreUpdate::OpenExtTab { ext_id, tab_id }) => {
-                self.active_view = ActiveView::Extension { ext_id, tab_id };
+                if let Some(snap) = &self.snapshot {
+                    match overlay_host_for(&ext_id, &snap.ext_sidebar_tabs) {
+                        Some(OverlayHost::Home) => {
+                            self.active_view = ActiveView::Home;
+                            self.home_plus_open = true;
+                        }
+                        Some(OverlayHost::Extension {
+                            ext_id: host_ext,
+                            tab_id: host_tab,
+                        }) => {
+                            self.active_view = ActiveView::Extension {
+                                ext_id: host_ext,
+                                tab_id: host_tab,
+                            };
+                        }
+                        None => {
+                            self.active_view = ActiveView::Extension { ext_id, tab_id };
+                        }
+                    }
+                } else {
+                    self.active_view = ActiveView::Extension { ext_id, tab_id };
+                }
+            }
+            Message::Core(CoreUpdate::CopyToClipboard(txt)) => {
+                return clipboard::write(txt);
+            }
+            Message::Core(CoreUpdate::RequestClipboardPaste { ext_id }) => {
+                return clipboard::read().map(move |opt| Message::ExtAction {
+                    ext_id: ext_id.clone(),
+                    action_id: "clipboard_pasted".to_string(),
+                    value: serde_json::Value::String(opt.unwrap_or_default()),
+                });
             }
             Message::SwitchView(v) => {
                 self.active_view = v;
@@ -550,6 +1172,9 @@ impl TntronApp {
             Message::SetTheme(slug) => self.send(CoreCommand::SetThemeSlug(slug)),
             Message::ExportPreferences => self.send(CoreCommand::ExportPreferences),
             Message::ImportPreferences => self.send(CoreCommand::ImportPreferences),
+            Message::TntBundleDraftChanged(s) => self.tnt_bundle_draft = s,
+            Message::ExportFullTnt(target) => self.send(CoreCommand::ExportFullTnt(target)),
+            Message::ImportFullTnt(target) => self.send(CoreCommand::ImportFullTnt(target)),
             Message::ToggleFavorite(p) => {
                 self.context_menu = None;
                 self.send(CoreCommand::ToggleFavorite(p));
@@ -700,12 +1325,21 @@ impl TntronApp {
             Message::DismissToast(id) => self.send(CoreCommand::DismissToast(id)),
             Message::VizTick => {
                 self.viz_phase = (self.viz_phase + 0.05) % 628.3185;
+                let gif_visible = self.is_gif_viz_visible();
+                let mut raw_bands = [0.0f32; 16];
+                let mut raw_beat = 0.0f32;
+                let mut is_playing = false;
+                let mut cur_speed = 1.0f64;
                 if let Some(snap) = &self.snapshot {
-                    if snap.play_state == PlayState::Playing {
+                    is_playing = snap.play_state == PlayState::Playing;
+                    cur_speed = snap.speed;
+                    if is_playing {
                         if let Some(an) = &snap.analysis {
                             let elapsed = self.pos_anchor_time.elapsed().as_secs_f64() * snap.speed;
                             let live_pos = self.pos_anchor_sec + elapsed;
                             let (target, beat) = an.sample_at(live_pos);
+                            raw_bands = target;
+                            raw_beat = beat;
                             for (dst, &src) in self.viz_bands.iter_mut().zip(target.iter()) {
                                 *dst = *dst * 0.35 + src * 0.65;
                             }
@@ -723,6 +1357,18 @@ impl TntronApp {
                         self.viz_beat *= 0.78;
                     }
                 }
+                self.gif_viz
+                    .on_frame(gif_visible, is_playing, cur_speed, &raw_bands, raw_beat);
+                if let Some(snap) = &self.snapshot {
+                    self.reactive_bg
+                        .on_frame(is_playing, &raw_bands, raw_beat, &snap.reactive_ui);
+                }
+            }
+            Message::NextGifViz => {
+                self.gif_viz.next_random_now();
+            }
+            Message::ToggleHomePlus => {
+                self.home_plus_open = !self.home_plus_open;
             }
             Message::StepSpeed(d) => self.send(CoreCommand::StepSpeedDelta(d)),
             Message::SetSpeedDirect(s) => self.send(CoreCommand::SetSpeed(s)),
@@ -735,9 +1381,121 @@ impl TntronApp {
             }
             Message::ToggleAlertsPopover => {
                 self.alerts_popover_open = !self.alerts_popover_open;
+                if self.alerts_popover_open {
+                    self.profile_popover_open = false;
+                }
             }
             Message::CloseAlertsPopover => {
                 self.alerts_popover_open = false;
+            }
+            Message::ToggleProfilePopover => {
+                self.profile_popover_open = !self.profile_popover_open;
+                if self.profile_popover_open {
+                    self.alerts_popover_open = false;
+                    if let Some(snap) = &self.snapshot {
+                        self.profile_name_draft = snap.profile.name.clone();
+                        self.profile_avatar_draft = snap.profile.avatar_path.clone().unwrap_or_default();
+                    }
+                }
+            }
+            Message::CloseProfilePopover => {
+                self.profile_popover_open = false;
+            }
+            Message::ProfileNameDraftChanged(s) => self.profile_name_draft = s,
+            Message::SubmitProfileName => {
+                self.send(CoreCommand::UpdateProfile {
+                    name: Some(self.profile_name_draft.clone()),
+                    bio: None,
+                    avatar_path: None,
+                    avatar_size: None,
+                    avatar_shape: None,
+                    avatar_fit: None,
+                });
+            }
+            Message::ProfileAvatarDraftChanged(s) => self.profile_avatar_draft = s,
+            Message::SubmitProfileAvatar => {
+                let p = self.profile_avatar_draft.trim().to_string();
+                self.send(CoreCommand::UpdateProfile {
+                    name: None,
+                    bio: None,
+                    avatar_path: Some(if p.is_empty() { None } else { Some(p) }),
+                    avatar_size: None,
+                    avatar_shape: None,
+                    avatar_fit: None,
+                });
+            }
+            Message::ClearProfileAvatar => {
+                self.profile_avatar_draft.clear();
+                self.send(CoreCommand::UpdateProfile {
+                    name: None,
+                    bio: None,
+                    avatar_path: Some(None),
+                    avatar_size: None,
+                    avatar_shape: None,
+                    avatar_fit: None,
+                });
+            }
+            Message::SetProfileAvatarSize(sz) => {
+                self.send(CoreCommand::UpdateProfile {
+                    name: None,
+                    bio: None,
+                    avatar_path: None,
+                    avatar_size: Some(sz),
+                    avatar_shape: None,
+                    avatar_fit: None,
+                });
+            }
+            Message::SetProfileAvatarShape(shape) => {
+                self.send(CoreCommand::UpdateProfile {
+                    name: None,
+                    bio: None,
+                    avatar_path: None,
+                    avatar_size: None,
+                    avatar_shape: Some(shape),
+                    avatar_fit: None,
+                });
+            }
+            Message::SetProfileAvatarFit(fit) => {
+                self.send(CoreCommand::UpdateProfile {
+                    name: None,
+                    bio: None,
+                    avatar_path: None,
+                    avatar_size: None,
+                    avatar_shape: None,
+                    avatar_fit: Some(fit),
+                });
+            }
+            Message::CopyProfileStatsTnt => {
+                if let Some(snap) = &self.snapshot {
+                    if let Ok(val) = serde_json::to_value(&snap.profile) {
+                        if let Ok(txt) = tntron_core::format_tnt_share_json(
+                            "tntron-profile-v1",
+                            &snap.profile.name,
+                            val,
+                        ) {
+                            self.profile_share_draft = txt;
+                        }
+                    }
+                }
+                self.send(CoreCommand::CopyProfileStatsTnt);
+            }
+            Message::PasteProfileStatsClipboard => {
+                return clipboard::read().map(|opt| {
+                    Message::ImportProfileStatsTnt(opt.unwrap_or_default())
+                });
+            }
+            Message::ProfileShareDraftChanged(s) => self.profile_share_draft = s,
+            Message::ImportProfileStatsTnt(raw) => {
+                if !raw.trim().is_empty() {
+                    self.profile_share_draft = raw.clone();
+                }
+                self.send(CoreCommand::ImportProfileStatsTnt(raw));
+            }
+            Message::ResetProfileStats => {
+                self.send(CoreCommand::ResetProfileStats);
+            }
+            Message::ResolvePendingProfileImport(approve) => {
+                self.send(CoreCommand::ResolvePendingProfileImport(approve));
             }
             Message::PresetNameChanged(s) => {
                 self.preset_name_draft = s;
@@ -778,12 +1536,16 @@ impl TntronApp {
                         "col_duration" => cfg.show_col_duration = !cfg.show_col_duration,
                         "telemetry" => cfg.show_telemetry_strip = !cfg.show_telemetry_strip,
                         "player_viz" => cfg.show_player_viz = !cfg.show_player_viz,
+                        "topbar_hide_ui" => cfg.show_topbar_hide_ui = !cfg.show_topbar_hide_ui,
                         _ => {}
                     }
                     self.send(CoreCommand::UpdateLayoutConfig(cfg));
                 }
             }
             Message::SetPlayerVizMode(mode) => {
+                if mode.eq_ignore_ascii_case("gif") {
+                    self.gif_viz.activate();
+                }
                 if let Some(snap) = &self.snapshot {
                     let mut cfg = snap.layout.clone();
                     cfg.player_viz_mode = mode;
@@ -797,8 +1559,12 @@ impl TntronApp {
                         "bars" => "wave".to_string(),
                         "wave" => "circle".to_string(),
                         "circle" => "flame".to_string(),
+                        "flame" => "gif".to_string(),
                         _ => "bars".to_string(),
                     };
+                    if cfg.player_viz_mode == "gif" {
+                        self.gif_viz.activate();
+                    }
                     self.send(CoreCommand::UpdateLayoutConfig(cfg));
                 }
             }
@@ -810,17 +1576,131 @@ impl TntronApp {
                 }
             }
             Message::ResetLayoutConfig => self.send(CoreCommand::ResetLayoutConfig),
+            Message::ToggleHideUi => self.send(CoreCommand::ToggleHideUi),
+            Message::ToggleDiscordFlag(flag) => {
+                if let Some(snap) = &self.snapshot {
+                    let mut cfg = snap.discord_rpc.clone();
+                    match flag {
+                        "enabled" => cfg.enabled = !cfg.enabled,
+                        "title" => cfg.show_title = !cfg.show_title,
+                        "artist" => cfg.show_artist = !cfg.show_artist,
+                        "album" => cfg.show_album = !cfg.show_album,
+                        "timestamps" => cfg.show_timestamps = !cfg.show_timestamps,
+                        "paused" => cfg.show_paused = !cfg.show_paused,
+                        "clear_on_pause" => cfg.clear_on_pause = !cfg.clear_on_pause,
+                        "codec" => cfg.show_codec = !cfg.show_codec,
+                        "bpm" => cfg.show_bpm = !cfg.show_bpm,
+                        "speed_pitch" => cfg.show_speed_pitch = !cfg.show_speed_pitch,
+                        "loop_shuffle" => cfg.show_loop_shuffle = !cfg.show_loop_shuffle,
+                        "queue" => cfg.show_queue_info = !cfg.show_queue_info,
+                        "idle" => cfg.show_idle = !cfg.show_idle,
+                        "button" => cfg.show_button = !cfg.show_button,
+                        "privacy" => cfg.privacy_mode = !cfg.privacy_mode,
+                        _ => {}
+                    }
+                    self.send(CoreCommand::UpdateDiscordRpcConfig(cfg));
+                }
+            }
+            Message::SetDiscordOption(opt, val) => {
+                if let Some(snap) = &self.snapshot {
+                    let mut cfg = snap.discord_rpc.clone();
+                    match opt {
+                        "activity_type" => {
+                            cfg.activity_type = val.parse::<u8>().unwrap_or(2);
+                        }
+                        "timestamp_mode" => cfg.timestamp_mode = val,
+                        "details_mode" => cfg.details_mode = val,
+                        "state_mode" => cfg.state_mode = val,
+                        _ => {}
+                    }
+                    self.send(CoreCommand::UpdateDiscordRpcConfig(cfg));
+                }
+            }
+            Message::DiscordFieldChanged(field, val) => match field {
+                "client_id" => self.discord_client_id_draft = val,
+                "idle_text" => self.discord_idle_draft = val,
+                "custom_details" => self.discord_details_draft = val,
+                "custom_state" => self.discord_state_draft = val,
+                "large_key" => self.discord_large_key_draft = val,
+                "large_text" => self.discord_large_text_draft = val,
+                "small_key" => self.discord_small_key_draft = val,
+                "small_text" => self.discord_small_text_draft = val,
+                "button_label" => self.discord_btn_label_draft = val,
+                "button_url" => self.discord_btn_url_draft = val,
+                _ => {}
+            },
+            Message::ApplyDiscordFields => {
+                if let Some(snap) = &self.snapshot {
+                    let mut cfg = snap.discord_rpc.clone();
+                    cfg.client_id = self.discord_client_id_draft.trim().to_string();
+                    cfg.idle_text = self.discord_idle_draft.trim().to_string();
+                    cfg.custom_details = self.discord_details_draft.clone();
+                    cfg.custom_state = self.discord_state_draft.clone();
+                    cfg.large_image_key = self.discord_large_key_draft.trim().to_string();
+                    cfg.large_text = self.discord_large_text_draft.clone();
+                    cfg.small_image_key = self.discord_small_key_draft.trim().to_string();
+                    cfg.small_text = self.discord_small_text_draft.clone();
+                    cfg.button_label = self.discord_btn_label_draft.trim().to_string();
+                    cfg.button_url = self.discord_btn_url_draft.trim().to_string();
+                    self.send(CoreCommand::UpdateDiscordRpcConfig(cfg));
+                }
+            }
+            Message::ReconnectDiscordRpc => self.send(CoreCommand::ReconnectDiscordRpc),
+            Message::ResetDiscordRpc => {
+                self.sync_discord_drafts(&DiscordRpcConfig::default());
+                self.send(CoreCommand::ResetDiscordRpcConfig);
+            }
+            Message::FontLoaded(res) => {
+                if let Err(err) = res {
+                    tracing::warn!("Failed loading imported icon font: {err:?}");
+                }
+            }
+            Message::ToggleFullscreen => {
+                self.is_fullscreen = !self.is_fullscreen;
+                let mode = if self.is_fullscreen {
+                    window::Mode::Fullscreen
+                } else {
+                    window::Mode::Windowed
+                };
+                return window::latest().and_then(move |id| window::set_mode(id, mode));
+            }
+            Message::SetFullscreen(on) => {
+                self.is_fullscreen = on;
+                let mode = if on {
+                    window::Mode::Fullscreen
+                } else {
+                    window::Mode::Windowed
+                };
+                return window::latest().and_then(move |id| window::set_mode(id, mode));
+            }
             Message::KeyPressed(key) => match key {
+                Key::Named(Named::F11) => {
+                    return self.update(Message::ToggleFullscreen);
+                }
                 Key::Character(ref c) if c.as_str() == "/" => {
                     return operation::focus(self.search_id.clone());
                 }
                 Key::Named(Named::Space) => self.send(CoreCommand::TogglePause),
                 Key::Named(Named::Escape) => {
+                    let had_overlay = self.context_menu.is_some()
+                        || self.modal.is_some()
+                        || self.alerts_popover_open
+                        || self.profile_popover_open
+                        || self.show_new_folder
+                        || !self.search_query.is_empty();
                     self.context_menu = None;
                     self.modal = None;
                     self.alerts_popover_open = false;
+                    self.profile_popover_open = false;
                     self.show_new_folder = false;
                     self.search_query.clear();
+                    if !had_overlay {
+                        if self.snapshot.as_ref().is_some_and(is_ui_hidden) {
+                            self.send(CoreCommand::ToggleHideUi);
+                        } else if self.is_fullscreen {
+                            return self.update(Message::SetFullscreen(false));
+                        }
+                    }
                 }
                 Key::Named(Named::Backspace) => self.send(CoreCommand::NavigateUp),
                 Key::Named(Named::Enter) => {
@@ -886,6 +1766,8 @@ impl TntronApp {
     pub fn view(&self) -> Element<'_, Message> {
         let theme = self.current_theme();
         let Some(snap) = &self.snapshot else {
+            icons::set_active_pack(&tntron_core::IconPackConfig::default());
+            button_style::set_active_pack(&ButtonPackConfig::default());
             return container(text("Starting tntron...").size(16).color(theme.muted))
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -897,49 +1779,105 @@ impl TntronApp {
                 })
                 .into();
         };
+        icons::set_active_pack(&snap.icon_pack);
+        button_style::set_active_pack(&snap.button_pack);
 
-        let sidebar = self.view_sidebar(snap, &theme);
-        let main_panel = self.view_main_panel(snap, &theme);
-
-        let mut grid_row = Row::new().spacing(8).height(Length::Fill).width(Length::Fill);
-        if snap.layout.sidebar_side.eq_ignore_ascii_case("right") {
-            grid_row = grid_row.push(main_panel).push(sidebar);
+        let tr = &snap.transparency;
+        let hide_ui = is_ui_hidden(snap);
+        let reactive_on = snap.reactive_ui.enabled && (!hide_ui || tr.keep_effects);
+        let custom_bg = if !hide_ui || tr.keep_effects {
+            self.view_custom_background(snap, &theme)
         } else {
-            grid_row = grid_row.push(sidebar).push(main_panel);
-        }
-        if self.queue_open {
-            grid_row = grid_row.push(self.view_queue_sidebar(snap, &theme));
-        }
-        if self.edit_layout_open {
-            grid_row = grid_row.push(self.view_layout_editor_drawer(snap, &theme));
-        }
+            None
+        };
+        let has_custom_bg = custom_bg.is_some();
 
-        let player_bar = self.view_player_bar(snap, &theme);
-        let mut root_col = column![container(grid_row).padding([8, 8]).height(Length::Fill)]
-            .spacing(4)
+        let root_content: Element<'_, Message> = if hide_ui {
+            self.view_focus_stage(snap, &theme)
+        } else {
+            let sidebar = self.view_sidebar(snap, &theme);
+            let main_panel = self.view_main_panel(snap, &theme);
+
+            let mut grid_row = Row::new().spacing(8).height(Length::Fill).width(Length::Fill);
+            if snap.layout.sidebar_side.eq_ignore_ascii_case("right") {
+                grid_row = grid_row.push(main_panel).push(sidebar);
+            } else {
+                grid_row = grid_row.push(sidebar).push(main_panel);
+            }
+            if self.queue_open {
+                grid_row = grid_row.push(self.view_queue_sidebar(snap, &theme));
+            }
+            if self.edit_layout_open {
+                grid_row = grid_row.push(self.view_layout_editor_drawer(snap, &theme));
+            }
+
+            let player_bar = self.view_player_bar(snap, &theme);
+            let mut root_col = column![container(grid_row).padding([8, 8]).height(Length::Fill)]
+                .spacing(4)
+                .width(Length::Fill)
+                .height(Length::Fill);
+            if self.speed_popover_open {
+                root_col = root_col.push(
+                    container(self.view_speed_presets_strip(snap, &theme)).padding([0, 12]),
+                );
+            }
+            root_col = root_col.push(player_bar);
+            root_col.into()
+        };
+
+        let root_shell = container(root_content)
             .width(Length::Fill)
-            .height(Length::Fill);
-        if self.speed_popover_open {
-            root_col = root_col.push(
-                container(self.view_speed_presets_strip(snap, &theme)).padding([0, 12]),
+            .height(Length::Fill)
+            .style({
+                let bg = if reactive_on || has_custom_bg || hide_ui {
+                    Color::TRANSPARENT
+                } else {
+                    theme.base
+                };
+                move |_| container::Style {
+                    background: Some(Background::Color(bg)),
+                    ..Default::default()
+                }
+            });
+
+        let mut layers: Vec<Element<'_, Message>> = Vec::new();
+        if let Some(bg_layer) = custom_bg {
+            layers.push(bg_layer);
+        }
+        if reactive_on {
+            layers.push(reactive_bg_canvas(
+                &self.reactive_bg,
+                &snap.reactive_ui,
+                theme.accent,
+                theme.base,
+                has_custom_bg,
+                self.custom_particle_handle.clone(),
+                snap.play_state == PlayState::Playing,
+            ));
+        }
+        layers.push(root_shell.into());
+        if hide_ui {
+            layers.push(
+                container(pill_icon_button(
+                    "Show UI",
+                    Some(icons::LAYERS),
+                    &theme,
+                    true,
+                    Message::ToggleHideUi,
+                ))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::End)
+                .align_y(Alignment::Start)
+                .padding([12, 16])
+                .into(),
             );
         }
-        root_col = root_col.push(player_bar);
-
-        let root_shell = container(root_col)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style({
-            let bg = theme.base;
-            move |_| container::Style {
-                background: Some(Background::Color(bg)),
-                ..Default::default()
-            }
-        });
-
-        let mut layers: Vec<Element<'_, Message>> = vec![root_shell.into()];
         if let Some(alerts) = self.view_alerts_popover(snap, &theme) {
             layers.push(alerts);
+        }
+        if let Some(prof) = self.view_profile_popover(snap, &theme) {
+            layers.push(prof);
         }
         if let Some(menu) = self.view_context_menu(&theme) {
             layers.push(menu);
@@ -953,6 +1891,241 @@ impl TntronApp {
         stack(layers).into()
     }
 
+    fn view_custom_background<'a>(
+        &'a self,
+        snap: &'a UiSnapshot,
+        theme: &ThemeSpec,
+    ) -> Option<Element<'a, Message>> {
+        let tr = &snap.transparency;
+        if !tr.enabled {
+            return None;
+        }
+        let alpha = tr.bg_image_alpha.clamp(0.05, 1.0);
+        let c1 = tr
+            .tint_hex
+            .as_deref()
+            .and_then(parse_hex_color)
+            .unwrap_or(theme.base);
+        let c2 = tr
+            .tint2_hex
+            .as_deref()
+            .and_then(parse_hex_color)
+            .unwrap_or(Color {
+                r: theme.accent.r * 0.45,
+                g: theme.accent.g * 0.45,
+                b: theme.accent.b * 0.45,
+                a: 1.0,
+            });
+        match tr.bg_mode.trim().to_ascii_lowercase().as_str() {
+            "color" => Some(custom_bg_canvas(
+                false,
+                Color { a: alpha, ..c1 },
+                Color { a: alpha, ..c1 },
+            )),
+            "gradient" => Some(custom_bg_canvas(
+                true,
+                Color { a: alpha, ..c1 },
+                Color { a: alpha, ..c2 },
+            )),
+            "image" | "cover" => {
+                let handle = if tr.bg_mode == "cover" {
+                    self.cover_handle.clone().or_else(|| self.custom_bg_handle.clone())
+                } else {
+                    self.custom_bg_handle.clone()
+                }?;
+                let fit = match tr.bg_fit.trim().to_ascii_lowercase().as_str() {
+                    "contain" => ContentFit::Contain,
+                    "fill" => ContentFit::Fill,
+                    _ => ContentFit::Cover,
+                };
+                let bg_tint = Color {
+                    a: tr.base_alpha.clamp(0.0, 1.0),
+                    ..theme.base
+                };
+                Some(
+                    container(
+                        image(handle)
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .content_fit(fit)
+                            .opacity(alpha),
+                    )
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(move |_| container::Style {
+                        background: Some(Background::Color(bg_tint)),
+                        ..Default::default()
+                    })
+                    .into(),
+                )
+            }
+            _ => None,
+        }
+    }
+
+    fn view_focus_stage<'a>(
+        &'a self,
+        snap: &'a UiSnapshot,
+        theme: &ThemeSpec,
+    ) -> Element<'a, Message> {
+        let tr = &snap.transparency;
+        let mut root_col = Column::new()
+            .spacing(8)
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        if tr.keep_topbar {
+            let mut top_row = Row::new()
+                .spacing(8)
+                .padding([10, 16])
+                .align_y(Alignment::Center)
+                .width(Length::Fill);
+            top_row = top_row.push(text("tntron").size(15).color(theme.accent));
+            top_row = top_row.push(space::horizontal());
+            for slot in &snap.ext_topbar_slots {
+                top_row = top_row.push(slot_badge(&slot.text, slot.icon.as_deref(), slot.accent, theme, None));
+            }
+            root_col = root_col.push(top_row);
+        }
+
+        let mut stage_center = Column::new()
+            .spacing(16)
+            .padding([20, 28])
+            .align_x(Alignment::Center)
+            .width(Length::Fill)
+            .height(Length::Fill);
+        stage_center = stage_center.push(space::vertical().height(Length::Fill));
+
+        if tr.keep_artwork {
+            if let Some(track) = &snap.current_track {
+                let cover_el: Element<'a, Message> = if let Some(handle) = &self.cover_handle {
+                    image(handle.clone())
+                        .width(Length::Fixed(180.0))
+                        .height(Length::Fixed(180.0))
+                        .content_fit(ContentFit::Cover)
+                        .into()
+                } else {
+                    container(self.view_brand_logo(snap, theme, Some(52.0)))
+                        .width(Length::Fixed(180.0))
+                        .height(Length::Fixed(180.0))
+                        .center_x(Length::Fixed(180.0))
+                        .center_y(Length::Fixed(180.0))
+                        .style({
+                            let card_bg = theme.card;
+                            move |_| container::Style {
+                                background: Some(Background::Color(card_bg)),
+                                border: Border {
+                                    radius: 14.0.into(),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            }
+                        })
+                        .into()
+                };
+                let bpm_txt = snap
+                    .track_bpm
+                    .map(|b| format!(" · {b:.0} BPM"))
+                    .unwrap_or_default();
+                stage_center = stage_center.push(
+                    card_box(
+                        column![
+                            cover_el,
+                            text(&track.title).size(22).color(theme.text),
+                            text(format!("{}{bpm_txt}", track.artist))
+                                .size(14)
+                                .color(theme.muted),
+                        ]
+                        .spacing(8)
+                        .align_x(Alignment::Center)
+                        .padding(16),
+                        theme,
+                        false,
+                    ),
+                );
+            }
+        }
+
+        if tr.keep_visualizer {
+            let viz_el: Element<'a, Message> = if snap.layout.player_viz_mode == "gif" {
+                let gv = self.gif_viz.view();
+                if let Some(handle) = gv.handle {
+                    container(
+                        image(handle)
+                            .content_fit(ContentFit::Contain)
+                            .width(Length::Fixed(340.0))
+                            .height(Length::Fixed(210.0)),
+                    )
+                    .into()
+                } else {
+                    container(visualizer_canvas(
+                        "bars",
+                        &self.viz_frame(),
+                        snap.play_state == PlayState::Playing,
+                        snap.volume,
+                        snap.speed,
+                        theme,
+                    ))
+                    .width(Length::Fill)
+                    .max_width(760.0)
+                    .height(Length::Fixed(180.0))
+                    .into()
+                }
+            } else {
+                container(visualizer_canvas(
+                    &snap.layout.player_viz_mode,
+                    &self.viz_frame(),
+                    snap.play_state == PlayState::Playing,
+                    snap.volume,
+                    snap.speed,
+                    theme,
+                ))
+                .width(Length::Fill)
+                .max_width(760.0)
+                .height(Length::Fixed(180.0))
+                .into()
+            };
+            stage_center = stage_center.push(viz_el);
+        }
+
+        if tr.keep_lyrics {
+            let line = snap
+                .current_lyric
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("♪ ...");
+            stage_center = stage_center.push(
+                card_box(
+                    container(text(line).size(22).color(theme.accent)).padding([10, 22]),
+                    theme,
+                    true,
+                ),
+            );
+        }
+
+        stage_center = stage_center.push(space::vertical().height(Length::Fill));
+
+        let mut mid_row = Row::new().spacing(8).width(Length::Fill).height(Length::Fill);
+        if tr.keep_sidebar {
+            mid_row = mid_row.push(self.view_sidebar(snap, theme));
+        }
+        mid_row = mid_row.push(stage_center);
+        if tr.keep_queue {
+            mid_row = mid_row.push(self.view_queue_sidebar(snap, theme));
+        }
+
+        root_col = root_col.push(container(mid_row).padding([8, 8]).height(Length::Fill));
+        if tr.keep_player {
+            if self.speed_popover_open {
+                root_col = root_col.push(
+                    container(self.view_speed_presets_strip(snap, theme)).padding([0, 12]),
+                );
+            }
+            root_col = root_col.push(self.view_player_bar(snap, theme));
+        }
+        root_col.into()
+    }
+
     fn view_sidebar<'a>(
         &'a self,
         snap: &'a UiSnapshot,
@@ -963,7 +2136,7 @@ impl TntronApp {
         nav_col = nav_col.push(
             container(
                 row![
-                    icons::icon(icons::MUSIC, 16.0, theme.accent),
+                    self.view_brand_logo(snap, theme, None),
                     text("tntron").size(17).color(theme.text),
                     space::horizontal(),
                     text("OPEN").size(10).color(theme.accent),
@@ -974,12 +2147,20 @@ impl TntronApp {
             .padding([6, 10]),
         );
 
+        let home_has_plus = !overlays_for_home(&snap.ext_sidebar_tabs).is_empty();
+        let visible_tabs: Vec<&ExtSidebarTab> = snap
+            .ext_sidebar_tabs
+            .iter()
+            .filter(|tab| overlay_host_for(&tab.ext_id, &snap.ext_sidebar_tabs).is_none())
+            .collect();
+
         if snap.compact_menu {
             let mut btns: Vec<Element<'_, Message>> = vec![
                 compact_nav_button(
                     icons::HOME,
                     "Home",
                     self.active_view == ActiveView::Home && !self.showing_favorites,
+                    home_has_plus,
                     theme,
                     Message::OpenFolder(snap.music_root.clone()),
                 ),
@@ -987,20 +2168,23 @@ impl TntronApp {
                     icons::SETTINGS,
                     "Settings",
                     self.active_view == ActiveView::Settings,
+                    false,
                     theme,
                     Message::SwitchView(ActiveView::Settings),
                 ),
             ];
-            for tab in &snap.ext_sidebar_tabs {
+            for tab in visible_tabs {
                 let target = ActiveView::Extension {
                     ext_id: tab.ext_id.clone(),
                     tab_id: tab.id.clone(),
                 };
                 let is_active = self.active_view == target;
+                let has_plus = !overlays_for_ext_tab(&snap.ext_sidebar_tabs, &tab.ext_id).is_empty();
                 btns.push(compact_nav_button(
                     resolve_icon(&tab.icon),
                     tab.label.as_str(),
                     is_active,
+                    has_plus,
                     theme,
                     Message::SwitchView(target),
                 ));
@@ -1020,6 +2204,7 @@ impl TntronApp {
                 icons::HOME,
                 "Home",
                 self.active_view == ActiveView::Home && !self.showing_favorites,
+                home_has_plus,
                 theme,
                 Message::OpenFolder(snap.music_root.clone()),
             ));
@@ -1027,22 +2212,26 @@ impl TntronApp {
                 icons::SETTINGS,
                 "Settings",
                 self.active_view == ActiveView::Settings,
+                false,
                 theme,
                 Message::SwitchView(ActiveView::Settings),
             ));
 
-            if !snap.ext_sidebar_tabs.is_empty() {
+            if !visible_tabs.is_empty() {
                 let mut ext_tabs_col = Column::new().spacing(2);
-                for tab in &snap.ext_sidebar_tabs {
+                for tab in visible_tabs {
                     let target = ActiveView::Extension {
                         ext_id: tab.ext_id.clone(),
                         tab_id: tab.id.clone(),
                     };
                     let is_active = self.active_view == target;
+                    let has_plus =
+                        !overlays_for_ext_tab(&snap.ext_sidebar_tabs, &tab.ext_id).is_empty();
                     ext_tabs_col = ext_tabs_col.push(sidebar_nav_item(
                         resolve_icon(&tab.icon),
                         tab.label.as_str(),
                         is_active,
+                        has_plus,
                         theme,
                         Message::SwitchView(target),
                     ));
@@ -1234,6 +2423,23 @@ impl TntronApp {
             self.queue_open,
             Message::ToggleQueueDrawer,
         ));
+        if snap.layout.show_topbar_hide_ui {
+            let hidden = is_ui_hidden(snap);
+            header_right = header_right.push(pill_icon_button(
+                if hidden { "Show UI" } else { "Hide UI" },
+                Some(icons::LAYERS),
+                theme,
+                hidden,
+                Message::ToggleHideUi,
+            ));
+        }
+        header_right = header_right.push(pill_button(
+            if self.is_fullscreen { "Exit Full" } else { "Fullscreen" },
+            theme,
+            self.is_fullscreen,
+            Message::ToggleFullscreen,
+        ));
+        header_right = header_right.push(self.view_profile_header_button(snap, theme));
 
         let top_header = container(
             row![search_box, space::horizontal(), header_right]
@@ -1285,7 +2491,7 @@ impl TntronApp {
                 .height(Length::Fixed(140.0))
                 .into()
         } else {
-            container(icons::icon(icons::MUSIC, 44.0, theme.accent))
+            container(self.view_brand_logo(snap, theme, Some(46.0)))
                 .width(Length::Fixed(140.0))
                 .height(Length::Fixed(140.0))
                 .center_x(Length::Fixed(140.0))
@@ -1374,8 +2580,9 @@ impl TntronApp {
         .padding(pad4(6.0, 20.0, 14.0, 20.0))
         .align_y(Alignment::Center);
 
+        let home_overlays = overlays_for_home(&snap.ext_sidebar_tabs);
         let cur_layout = snap.home_layout.as_str();
-        let controls_row = row![
+        let mut controls_row = row![
             pill_button(
                 "Compact",
                 theme,
@@ -1443,6 +2650,14 @@ impl TntronApp {
         .spacing(6)
         .padding([0, 20])
         .align_y(Alignment::Center);
+        if !home_overlays.is_empty() && !self.showing_favorites && snap.current_dir == snap.music_root {
+            controls_row = controls_row.push(pill_button(
+                "Home+",
+                theme,
+                self.home_plus_open,
+                Message::ToggleHomePlus,
+            ));
+        }
 
         let mut recent_bar = Row::new()
             .spacing(8)
@@ -1586,9 +2801,22 @@ impl TntronApp {
                             continue;
                         }
                         let selected = self.selected_idx == Some(idx);
-                        let row_inner = row![
+                        let folder_art: Element<'a, Message> = if let Some((_, h)) = self.card_covers.get(path) {
+                            container(
+                                image(h.clone())
+                                    .content_fit(ContentFit::Cover)
+                                    .width(Length::Fixed(28.0))
+                                    .height(Length::Fixed(28.0)),
+                            )
+                            .width(Length::Fixed(34.0))
+                            .into()
+                        } else {
                             container(icons::icon(icons::FOLDER, 14.0, theme.accent))
-                                .width(Length::Fixed(34.0)),
+                                .width(Length::Fixed(34.0))
+                                .into()
+                        };
+                        let row_inner = row![
+                            folder_art,
                             text(name).size(14).color(theme.text).width(Length::Fill),
                             text("Subfolder")
                                 .size(12)
@@ -1873,6 +3101,46 @@ impl TntronApp {
         if has_recents && snap.layout.show_recent_strip {
             out = out.push(recent_bar);
         }
+        if self.home_plus_open
+            && !home_overlays.is_empty()
+            && !self.showing_favorites
+            && snap.current_dir == snap.music_root
+            && q.is_empty()
+        {
+            let viz = self.viz_frame();
+            let ext_viz = ExtVizCtx {
+                frame: viz,
+                gif: self.gif_viz.view(),
+                on_next_gif: Message::NextGifViz,
+            };
+            let mut hp_col = Column::new().spacing(10).padding(14);
+            for tab in &home_overlays {
+                for w in &tab.widgets {
+                    hp_col = hp_col.push(render_ext_widget(
+                        w,
+                        &tab.ext_id,
+                        theme,
+                        &ext_viz,
+                        &self.ext_inputs,
+                        |eid, aid, value| Message::ExtAction {
+                            ext_id: eid,
+                            action_id: aid,
+                            value,
+                        },
+                        |eid, wid, value| Message::ExtInputChanged {
+                            ext_id: eid,
+                            widget_id: wid,
+                            value,
+                        },
+                    ));
+                }
+            }
+            out = out.push(
+                container(scrollable(card_box(hp_col, theme, false).width(Length::Fill)))
+                    .padding([0, 20])
+                    .max_height(260.0),
+            );
+        }
 
         if !self.showing_favorites && (cur_layout == "cards" || cur_layout == "gallery") {
             let tile_px = if cur_layout == "gallery" { 96.0 } else { 64.0 };
@@ -1887,10 +3155,19 @@ impl TntronApp {
                             continue;
                         }
                         shown += 1;
+                        let folder_thumb: Element<'a, Message> = if let Some((_, h)) = self.card_covers.get(path) {
+                            image(h.clone())
+                                .content_fit(ContentFit::Cover)
+                                .width(Length::Fixed(tile_px))
+                                .height(Length::Fixed(tile_px))
+                                .into()
+                        } else {
+                            icons::icon(icons::FOLDER, 28.0, theme.accent).into()
+                        };
                         let card = card_box(
                             column![
                                 row![
-                                    icons::icon(icons::FOLDER, 28.0, theme.accent),
+                                    folder_thumb,
                                     space::horizontal(),
                                     glyph_button(
                                         icons::PLAY,
@@ -2130,6 +3407,13 @@ impl TntronApp {
                         .spacing(3),
                         space::horizontal(),
                         pill_icon_button(
+                            if self.is_fullscreen { "Exit Fullscreen (F11)" } else { "Fullscreen (F11)" },
+                            Some(icons::LAYERS),
+                            theme,
+                            self.is_fullscreen,
+                            Message::ToggleFullscreen,
+                        ),
+                        pill_icon_button(
                             if self.edit_layout_open { "Close Layout Drawer" } else { "Edit Layout Drawer" },
                             Some(icons::SLIDERS),
                             theme,
@@ -2158,6 +3442,7 @@ impl TntronApp {
                         flag_btn("Album Col", cfg.show_col_album, "col_album"),
                         flag_btn("Time Col", cfg.show_col_duration, "col_duration"),
                         flag_btn("Mini Viz", cfg.show_player_viz, "player_viz"),
+                        flag_btn("Top-Right Hide UI", cfg.show_topbar_hide_ui, "topbar_hide_ui"),
                         pill_button("Toast Top-R", theme, cfg.toast_zone == "top-right", Message::SetToastZone("top-right".into())),
                         pill_button("Toast Top-L", theme, cfg.toast_zone == "top-left", Message::SetToastZone("top-left".into())),
                         pill_button("Toast Bot-R", theme, cfg.toast_zone == "bottom-right", Message::SetToastZone("bottom-right".into())),
@@ -2184,10 +3469,10 @@ impl TntronApp {
                     text(format!("Audio Stream / Codec: {codec_info}"))
                         .size(13)
                         .color(theme.text),
-                    text(format!("mpv IPC: {ipc_label}  ·  Metadata Cache: {}/10000 tracks  ·  Library: {} tracks in {} playlists", snap.cache_len, snap.all_tracks.len(), snap.folder_cards.len()))
+                    text(format!("mpv IPC: {ipc_label}  ·  Display: {}  ·  Metadata Cache: {}/10000 tracks  ·  Library: {} tracks in {} playlists", self.display_env.label(), snap.cache_len, snap.all_tracks.len(), snap.folder_cards.len()))
                         .size(12)
                         .color(theme.muted),
-                    text("Shortcuts: Space Play/Pause · / Search · q Queue · m Mute · j/k Select")
+                    text("Shortcuts: Space Play/Pause · F11 Fullscreen · / Search · q Queue · m Mute · j/k Select")
                         .size(12)
                         .color(theme.muted),
                 ]
@@ -2199,12 +3484,56 @@ impl TntronApp {
             .width(Length::Fill),
         );
 
+        col = col.push(self.view_discord_rpc_card(snap, theme));
+
+        let tnt_files = list_tnt_files(&default_tnt_dir());
+        let mut tnt_chips = Row::new().spacing(6);
+        for (name, _) in tnt_files.iter().take(6) {
+            tnt_chips = tnt_chips.push(pill_icon_button(
+                format!("{name}.tnt"),
+                Some(icons::DOWNLOAD),
+                theme,
+                false,
+                Message::ImportFullTnt(name.clone()),
+            ));
+        }
+
         col = col.push(
             card_box(
                 column![
-                    text("Data Management").size(16).color(theme.text),
-                    text("Export or import all preferences, EQ/DSP presets, theme & extension settings (~/.config/tntron/tntron_preferences.json)")
+                    text("Data Management & Full .tnt Export").size(16).color(theme.text),
+                    text("Built-in .tnt bundle export saves ALL settings, theme, DSP, Button/Reactive configs, and ALL installed extensions into one portable .tnt file (~/.config/tntron/tnt/).")
                         .size(12)
+                        .color(theme.muted),
+                    row![
+                        text_input("tntron_full_backup or ~/Documents/backup.tnt", &self.tnt_bundle_draft)
+                            .on_input(Message::TntBundleDraftChanged)
+                            .size(12)
+                            .padding([6, 10])
+                            .width(Length::Fill),
+                        primary_pill_icon_button(
+                            "Export Full .tnt",
+                            Some(icons::DOWNLOAD),
+                            theme,
+                            Message::ExportFullTnt(self.tnt_bundle_draft.clone()),
+                        ),
+                        pill_icon_button(
+                            "Import Full .tnt",
+                            Some(icons::REFRESH),
+                            theme,
+                            false,
+                            Message::ImportFullTnt(self.tnt_bundle_draft.clone()),
+                        ),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                    if tnt_files.is_empty() {
+                        Element::from(space::horizontal().width(Length::Fixed(0.0)))
+                    } else {
+                        tnt_chips.wrap().into()
+                    },
+                    text("Quick Preferences JSON (~/.config/tntron/tntron_preferences.json)")
+                        .size(11)
                         .color(theme.muted),
                     row![
                         pill_icon_button(
@@ -2388,6 +3717,11 @@ impl TntronApp {
         );
 
         let viz = self.viz_frame();
+        let ext_viz = ExtVizCtx {
+            frame: viz,
+            gif: self.gif_viz.view(),
+            on_next_gif: Message::NextGifViz,
+        };
         // 3. Extension Settings Panels registered dynamically via tntron.ui.register_settings
         for panel in &snap.ext_settings_panels {
             let mut pcol = Column::new().spacing(10).padding(16);
@@ -2397,7 +3731,7 @@ impl TntronApp {
                     w,
                     &panel.ext_id,
                     theme,
-                    &viz,
+                    &ext_viz,
                     &self.ext_inputs,
                     |ext_id, action_id, value| Message::ExtAction {
                         ext_id,
@@ -2435,31 +3769,47 @@ impl TntronApp {
         };
 
         let mut col = Column::new().spacing(14).padding(pad4(12.0, 22.0, 24.0, 22.0));
-        col = col.push(
-            row![
-                icons::icon(resolve_icon(&tab.icon), 22.0, theme.accent),
-                text(&tab.label).size(26).color(theme.text),
-                slot_badge(ext_id, None, false, theme, None),
-            ]
-            .spacing(12)
-            .align_y(Alignment::Center),
-        );
+        let overlays = overlays_for_ext_tab(&snap.ext_sidebar_tabs, ext_id);
+        let mut header_row = row![
+            icons::icon(resolve_icon(&tab.icon), 22.0, theme.accent),
+            text(if overlays.is_empty() {
+                tab.label.clone()
+            } else {
+                format!("{}+", tab.label)
+            })
+            .size(26)
+            .color(theme.text),
+            slot_badge(ext_id, None, false, theme, None),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+        for otab in &overlays {
+            header_row = header_row.push(slot_badge(&otab.label, Some("plus"), true, theme, None));
+        }
+        col = col.push(header_row);
 
         let viz = self.viz_frame();
-        let mut card_col = Column::new().spacing(12).padding(16);
-        if tab.widgets.is_empty() {
-            card_col = card_col.push(
-                text("This extension tab has no rendered widgets yet.")
-                    .size(13)
-                    .color(theme.muted),
-            );
-        } else {
-            for w in &tab.widgets {
-                card_col = card_col.push(render_ext_widget(
+        let ext_viz = ExtVizCtx {
+            frame: viz,
+            gif: self.gif_viz.view(),
+            on_next_gif: Message::NextGifViz,
+        };
+
+        let is_merged_viz = ext_id == "openify.visualizer"
+            && overlays
+                .iter()
+                .any(|o| o.ext_id == "openify.better-visualizer");
+
+        let push_widgets = |dest: &mut Column<'a, Message>, widgets: &'a [ExtWidget], owner: &'a str, skip_viz: bool| {
+            for w in widgets {
+                if skip_viz && matches!(w, ExtWidget::Visualizer { .. }) {
+                    continue;
+                }
+                *dest = std::mem::replace(dest, Column::new()).push(render_ext_widget(
                     w,
-                    ext_id,
+                    owner,
                     theme,
-                    &viz,
+                    &ext_viz,
                     &self.ext_inputs,
                     |eid, aid, value| Message::ExtAction {
                         ext_id: eid,
@@ -2473,8 +3823,45 @@ impl TntronApp {
                     },
                 ));
             }
+        };
+
+        if is_merged_viz {
+            // Put Visualizer+'s enhanced 10-scene stage first, then base Visualizer's energy/topbar controls.
+            for otab in &overlays {
+                let mut ocol = Column::new().spacing(12).padding(16);
+                push_widgets(&mut ocol, &otab.widgets, &otab.ext_id, false);
+                col = col.push(card_box(ocol, theme, true).width(Length::Fill));
+            }
+            let mut base_extra = Column::new().spacing(10).padding(16);
+            push_widgets(&mut base_extra, &tab.widgets, ext_id, true);
+            col = col.push(card_box(base_extra, theme, false).width(Length::Fill));
+        } else {
+            let mut card_col = Column::new().spacing(12).padding(16);
+            if tab.widgets.is_empty() {
+                card_col = card_col.push(
+                    text("This extension tab has no rendered widgets yet.")
+                        .size(13)
+                        .color(theme.muted),
+                );
+            } else {
+                push_widgets(&mut card_col, &tab.widgets, ext_id, false);
+            }
+            col = col.push(card_box(card_col, theme, true).width(Length::Fill));
+
+            for otab in overlays {
+                let mut ocol = Column::new().spacing(12).padding(16);
+                ocol = ocol.push(
+                    row![
+                        slot_badge(&otab.label, Some("plus"), true, theme, None),
+                        slot_badge(&otab.ext_id, None, false, theme, None),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                );
+                push_widgets(&mut ocol, &otab.widgets, &otab.ext_id, false);
+                col = col.push(card_box(ocol, theme, false).width(Length::Fill));
+            }
         }
-        col = col.push(card_box(card_col, theme, true).width(Length::Fill));
 
         scrollable(col).height(Length::Fill).into()
     }
@@ -2604,8 +3991,7 @@ impl TntronApp {
                 .into()
         } else {
             let card_bg = theme.card;
-            let accent = theme.accent;
-            container(icons::icon(icons::MUSIC, 20.0, accent))
+            container(self.view_brand_logo(snap, theme, Some(22.0)))
                 .width(Length::Fixed(56.0))
                 .height(Length::Fixed(56.0))
                 .center_x(Length::Fixed(56.0))
@@ -2633,14 +4019,23 @@ impl TntronApp {
         };
         let mut left_info = row![
             art,
-            column![
-                text(title).size(14).color(theme.text),
-                text(artist_line).size(12).color(theme.muted),
-            ]
-            .spacing(3)
-            .width(Length::Fixed(185.0)),
+            container(
+                column![
+                    text(title)
+                        .size(14)
+                        .color(theme.text)
+                        .wrapping(iced::widget::text::Wrapping::None),
+                    text(artist_line)
+                        .size(12)
+                        .color(theme.muted)
+                        .wrapping(iced::widget::text::Wrapping::None),
+                ]
+                .spacing(3),
+            )
+            .width(Length::Fill)
+            .clip(true),
         ]
-        .spacing(12)
+        .spacing(10)
         .align_y(Alignment::Center);
 
         if let Some(cp) = cur_path {
@@ -2726,7 +4121,7 @@ impl TntronApp {
         let center_col = column![controls, seek_bar]
             .spacing(6)
             .align_x(Alignment::Center)
-            .width(Length::FillPortion(5));
+            .width(Length::FillPortion(4));
 
         let mute_glyph = if snap.is_muted {
             icons::VOLUME_MUTE
@@ -2735,18 +4130,56 @@ impl TntronApp {
         };
         let mut right_row = Row::new().spacing(6).align_y(Alignment::Center);
         if snap.layout.show_player_viz {
-            let viz_btn = iced::widget::button(mini_visualizer_canvas(
-                &snap.layout.player_viz_mode,
-                &self.viz_frame(),
-                snap.play_state == PlayState::Playing,
-                theme,
-            ))
-            .padding(0)
-            .style(|_, _| iced::widget::button::Style {
-                background: None,
-                ..Default::default()
-            })
-            .on_press(Message::CyclePlayerVizMode);
+            let gif_view = self.gif_viz.view();
+            let viz_inner: Element<'a, Message> = if snap.layout.player_viz_mode == "gif" {
+                if let Some(handle) = gif_view.handle {
+                    let accent = theme.accent;
+                    let card_bg = theme.card;
+                    let flash = gif_view.flash;
+                    container(
+                        image(handle.clone())
+                            .content_fit(ContentFit::Cover)
+                            .width(Length::Fixed(72.0))
+                            .height(Length::Fixed(34.0)),
+                    )
+                    .width(Length::Fixed(72.0))
+                    .height(Length::Fixed(34.0))
+                    .style(move |_| container::Style {
+                        background: Some(Background::Color(card_bg)),
+                        border: Border {
+                            color: Color {
+                                a: (0.28 + flash * 0.72).clamp(0.28, 1.0),
+                                ..accent
+                            },
+                            width: if flash > 0.25 { 1.6 } else { 1.0 },
+                            radius: 8.0.into(),
+                        },
+                        ..Default::default()
+                    })
+                    .into()
+                } else {
+                    mini_visualizer_canvas(
+                        &snap.layout.player_viz_mode,
+                        &self.viz_frame(),
+                        snap.play_state == PlayState::Playing,
+                        theme,
+                    )
+                }
+            } else {
+                mini_visualizer_canvas(
+                    &snap.layout.player_viz_mode,
+                    &self.viz_frame(),
+                    snap.play_state == PlayState::Playing,
+                    theme,
+                )
+            };
+            let viz_btn = iced::widget::button(viz_inner)
+                .padding(0)
+                .style(|_, _| iced::widget::button::Style {
+                    background: None,
+                    ..Default::default()
+                })
+                .on_press(Message::CyclePlayerVizMode);
             right_row = right_row.push(viz_btn);
         }
         right_row = right_row
@@ -2777,12 +4210,14 @@ impl TntronApp {
             ));
 
         let right_controls = container(right_row)
-            .width(Length::FillPortion(5))
+            .width(Length::FillPortion(4))
             .align_x(Alignment::End);
 
+        let bar_bg = theme.sidebar;
+        let bar_border = theme.border;
         container(
             row![
-                container(left_info).width(Length::FillPortion(3)),
+                container(left_info).width(Length::FillPortion(4)),
                 container(center_col).width(Length::FillPortion(4)),
                 right_controls,
             ]
@@ -2792,6 +4227,15 @@ impl TntronApp {
         )
         .width(Length::Fill)
         .height(Length::Fixed(88.0))
+        .style(move |_| container::Style {
+            background: Some(Background::Color(bar_bg)),
+            border: Border {
+                color: bar_border,
+                width: 0.5,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        })
         .into()
     }
 
@@ -2968,6 +4412,7 @@ impl TntronApp {
                 flag_row("Album Col", cfg.show_col_album, "col_album"),
                 flag_row("Time Col", cfg.show_col_duration, "col_duration"),
                 flag_row("Mini Viz", cfg.show_player_viz, "player_viz"),
+                flag_row("Top-Right Hide UI", cfg.show_topbar_hide_ui, "topbar_hide_ui"),
             ]
             .spacing(6)
             .wrap(),
@@ -2977,6 +4422,7 @@ impl TntronApp {
                 pill_button("Wave", theme, cfg.player_viz_mode == "wave", Message::SetPlayerVizMode("wave".into())),
                 pill_button("Circle", theme, cfg.player_viz_mode == "circle", Message::SetPlayerVizMode("circle".into())),
                 pill_button("Flame", theme, cfg.player_viz_mode == "flame", Message::SetPlayerVizMode("flame".into())),
+                pill_button("GIF", theme, cfg.player_viz_mode == "gif", Message::SetPlayerVizMode("gif".into())),
             ]
             .spacing(6)
             .wrap(),
@@ -3204,6 +4650,86 @@ impl TntronApp {
         snap: &'a UiSnapshot,
         theme: &ThemeSpec,
     ) -> Option<Element<'a, Message>> {
+        if let Some(imported) = &snap.pending_profile_import {
+            let mut top_songs = Column::new().spacing(4);
+            let mut ranked: Vec<_> = imported.stats_track_plays.values().collect();
+            ranked.sort_by_key(|item| std::cmp::Reverse(item.count));
+            for (idx, item) in ranked.iter().take(4).enumerate() {
+                top_songs = top_songs.push(
+                    text(format!("{}. {} — {} ({} plays)", idx + 1, item.title, item.artist, item.count))
+                        .size(11)
+                        .color(theme.muted),
+                );
+            }
+            let body = column![
+                row![
+                    icons::icon(icons::CHART, 16.0, theme.accent),
+                    text("Import Profile & Listening Stats from .tnt?").size(16).color(theme.text),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+                text("By default, .tnt imports keep your local profile stats unchanged. Approve once to replace your profile stats with the imported data below:")
+                    .size(12)
+                    .color(theme.muted),
+                card_box(
+                    column![
+                        text(format!("Profile: {}", imported.name)).size(13).color(theme.text),
+                        text(format!(
+                            "Listening Time: {}  ·  Total Plays: {}  ·  {} Tracks",
+                            fmt_duration_words(imported.stats_total_sec),
+                            imported.stats_total_plays,
+                            imported.stats_track_plays.len()
+                        ))
+                        .size(12)
+                        .color(theme.accent),
+                        top_songs,
+                    ]
+                    .spacing(6)
+                    .padding(12),
+                    theme,
+                    false,
+                ),
+                row![
+                    space::horizontal(),
+                    pill_button(
+                        "Skip (Keep My Stats)",
+                        theme,
+                        false,
+                        Message::ResolvePendingProfileImport(false),
+                    ),
+                    primary_pill_icon_button(
+                        "Approve & Import Stats",
+                        Some(icons::DOWNLOAD),
+                        theme,
+                        Message::ResolvePendingProfileImport(true),
+                    ),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            ]
+            .spacing(14)
+            .padding(20);
+
+            let backdrop = mouse_area(
+                container(text(""))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|_| container::Style {
+                        background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.58))),
+                        ..Default::default()
+                    }),
+            )
+            .on_press(Message::ResolvePendingProfileImport(false));
+
+            let card = card_box(body, theme, true).width(Length::Fixed(460.0));
+            let centered = container(card)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill);
+            return Some(stack([backdrop.into(), centered.into()]).into());
+        }
+
         let modal = self.modal.as_ref()?;
         let body: Element<'a, Message> = match modal {
             ModalState::ConfirmDeleteFolder { name, .. } => column![
@@ -3447,6 +4973,300 @@ impl TntronApp {
         )
     }
 
+    fn render_avatar_widget<'a>(
+        &'a self,
+        prof: &tntron_core::ProfileConfig,
+        size_px: f32,
+        theme: &ThemeSpec,
+    ) -> Element<'a, Message> {
+        let r = match prof.avatar_shape.trim().to_ascii_lowercase().as_str() {
+            "square" => 3.0,
+            "rounded" => (size_px * 0.24).max(6.0),
+            _ => size_px * 0.5,
+        };
+        if let Some(h) = &self.avatar_handle {
+            let fit = if prof.avatar_fit.eq_ignore_ascii_case("contain") {
+                ContentFit::Contain
+            } else {
+                ContentFit::Cover
+            };
+            container(
+                image(h.clone())
+                    .width(Length::Fixed(size_px))
+                    .height(Length::Fixed(size_px))
+                    .content_fit(fit)
+                    .border_radius(r),
+            )
+            .width(Length::Fixed(size_px))
+            .height(Length::Fixed(size_px))
+            .clip(true)
+            .style({
+                let accent = theme.accent;
+                move |_| container::Style {
+                    border: Border {
+                        color: accent,
+                        width: 1.2,
+                        radius: r.into(),
+                    },
+                    ..Default::default()
+                }
+            })
+            .into()
+        } else {
+            let ch = prof
+                .name
+                .chars()
+                .find(|c| c.is_alphanumeric())
+                .unwrap_or('T')
+                .to_ascii_uppercase()
+                .to_string();
+            let accent = theme.accent;
+            let accent_fg = theme.accent_fg;
+            container(text(ch).size((size_px * 0.44).max(11.0)).color(accent_fg))
+                .width(Length::Fixed(size_px))
+                .height(Length::Fixed(size_px))
+                .center_x(Length::Fixed(size_px))
+                .center_y(Length::Fixed(size_px))
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(accent)),
+                    border: Border {
+                        radius: r.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .into()
+        }
+    }
+
+    fn view_profile_header_button<'a>(
+        &'a self,
+        snap: &'a UiSnapshot,
+        theme: &ThemeSpec,
+    ) -> Element<'a, Message> {
+        let prof = &snap.profile;
+        let thumb_px = prof.avatar_size.clamp(22.0, 34.0);
+        let avatar = self.render_avatar_widget(prof, thumb_px, theme);
+        let active = self.profile_popover_open;
+        let th = theme.clone();
+        let bg = if active { th.accent } else { th.card };
+        let fg = if active { th.accent_fg } else { th.text };
+        let border = if active { th.accent } else { th.border };
+        let hover_bg = th.card_hover;
+
+        iced::widget::button(
+            button_style::wrap_chrome(
+                row![
+                    avatar,
+                    text(&prof.name)
+                        .size(12)
+                        .color(fg)
+                        .wrapping(iced::widget::text::Wrapping::None),
+                ]
+                .spacing(7)
+                .align_y(Alignment::Center),
+                [3, 10],
+                button_style::ButtonKind::Pill,
+                &th,
+                th.surface,
+            ),
+        )
+        .padding(0)
+        .style(move |_, status| {
+            let hovered = matches!(
+                status,
+                iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
+            );
+            button_style::compute_button_style(
+                button_style::ButtonKind::Pill,
+                active,
+                hovered,
+                bg,
+                hover_bg,
+                fg,
+                border,
+                20.0,
+                &th,
+            )
+        })
+        .on_press(Message::ToggleProfilePopover)
+        .into()
+    }
+
+    fn view_profile_popover<'a>(
+        &'a self,
+        snap: &'a UiSnapshot,
+        theme: &ThemeSpec,
+    ) -> Option<Element<'a, Message>> {
+        if !self.profile_popover_open {
+            return None;
+        }
+        let prof = &snap.profile;
+        let preview_size = prof.avatar_size.clamp(28.0, 92.0);
+        let avatar_preview = self.render_avatar_widget(prof, preview_size, theme);
+
+        let mut ranked: Vec<_> = prof.stats_track_plays.values().collect();
+        ranked.sort_by_key(|item| std::cmp::Reverse(item.count));
+
+        let mut top_col = Column::new().spacing(5).width(Length::Fill);
+        if ranked.is_empty() {
+            top_col = top_col.push(
+                text("Play songs to build your personal listening stats.")
+                    .size(12)
+                    .color(theme.muted),
+            );
+        } else {
+            for (idx, item) in ranked.iter().take(6).enumerate() {
+                top_col = top_col.push(card_box(
+                    container(
+                        row![
+                            text(format!("#{}", idx + 1)).size(11).color(theme.accent),
+                            column![
+                                text(&item.title).size(12).color(theme.text),
+                                text(&item.artist).size(10).color(theme.muted),
+                            ]
+                            .spacing(1)
+                            .width(Length::Fill),
+                            text(format!("{}x", item.count)).size(12).color(theme.accent),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    )
+                    .padding([6, 10])
+                    .width(Length::Fill),
+                    theme,
+                    idx == 0,
+                ));
+            }
+        }
+
+        let header = row![
+            avatar_preview,
+            column![
+                text(&prof.name).size(15).color(theme.text),
+                text(format!(
+                    "{} · {} plays · {} tracks",
+                    fmt_duration_words(prof.stats_total_sec),
+                    prof.stats_total_plays,
+                    prof.stats_track_plays.len()
+                ))
+                .size(11)
+                .color(theme.accent),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            glyph_button(
+                icons::CLOSE,
+                13.0,
+                theme,
+                false,
+                Message::CloseProfilePopover,
+            ),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+
+        let content = column![
+            header,
+            row![
+                text_input("Display Name", &self.profile_name_draft)
+                    .on_input(Message::ProfileNameDraftChanged)
+                    .on_submit(Message::SubmitProfileName)
+                    .size(12)
+                    .padding([5, 8])
+                    .width(Length::Fill),
+                pill_button("Save Name", theme, false, Message::SubmitProfileName),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+            text("Profile Picture (.jxl, .png, .jpg, .webp)")
+                .size(11)
+                .color(theme.muted),
+            row![
+                text_input("~/Pictures/avatar.jxl", &self.profile_avatar_draft)
+                    .on_input(Message::ProfileAvatarDraftChanged)
+                    .on_submit(Message::SubmitProfileAvatar)
+                    .size(12)
+                    .padding([5, 8])
+                    .width(Length::Fill),
+                pill_button("Set", theme, true, Message::SubmitProfileAvatar),
+                glyph_button(icons::CLOSE, 12.0, theme, false, Message::ClearProfileAvatar),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+            row![
+                text(format!("Avatar Size {:.0}px", prof.avatar_size)).size(11).color(theme.muted),
+                slider(24.0..=92.0, prof.avatar_size, Message::SetProfileAvatarSize)
+                    .step(2.0)
+                    .width(Length::Fill),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            row![
+                pill_button("Circle", theme, prof.avatar_shape == "circle", Message::SetProfileAvatarShape("circle".into())),
+                pill_button("Rounded", theme, prof.avatar_shape == "rounded", Message::SetProfileAvatarShape("rounded".into())),
+                pill_button("Square", theme, prof.avatar_shape == "square", Message::SetProfileAvatarShape("square".into())),
+                space::horizontal(),
+                pill_button("Cover", theme, prof.avatar_fit != "contain", Message::SetProfileAvatarFit("cover".into())),
+                pill_button("Fit", theme, prof.avatar_fit == "contain", Message::SetProfileAvatarFit("contain".into())),
+            ]
+            .spacing(5)
+            .align_y(Alignment::Center),
+            row![
+                text("Listening Stats").size(13).color(theme.text),
+                space::horizontal(),
+                pill_icon_button("Copy Stats (.tnt)", Some(icons::DOWNLOAD), theme, true, Message::CopyProfileStatsTnt),
+                pill_icon_button("Paste", Some(icons::REFRESH), theme, false, Message::PasteProfileStatsClipboard),
+                pill_button("Reset", theme, false, Message::ResetProfileStats),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+            row![
+                text_input("Paste profile .tnt JSON...", &self.profile_share_draft)
+                    .on_input(Message::ProfileShareDraftChanged)
+                    .on_submit(Message::ImportProfileStatsTnt(self.profile_share_draft.clone()))
+                    .size(11)
+                    .padding([5, 8])
+                    .width(Length::Fill),
+                pill_button("Import", theme, false, Message::ImportProfileStatsTnt(self.profile_share_draft.clone())),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+            container(scrollable(top_col).height(Length::Shrink)).max_height(185.0),
+        ]
+        .spacing(10)
+        .padding(14);
+
+        let surface = theme.surface;
+        let accent = theme.accent;
+        let card = container(content)
+            .width(Length::Fixed(420.0))
+            .style(move |_| container::Style {
+                background: Some(Background::Color(surface)),
+                border: Border {
+                    color: accent,
+                    width: 1.0,
+                    radius: 14.0.into(),
+                },
+                shadow: iced::Shadow {
+                    color: Color { a: 0.55, ..Color::BLACK },
+                    offset: iced::Vector::new(0.0, 8.0),
+                    blur_radius: 22.0,
+                },
+                ..Default::default()
+            });
+
+        Some(
+            container(card)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding(pad4(58.0, 26.0, 0.0, 0.0))
+                .align_x(Alignment::End)
+                .align_y(Vertical::Top)
+                .into(),
+        )
+    }
+
     fn view_toast_overlay<'a>(
         &'a self,
         snap: &'a UiSnapshot,
@@ -3513,4 +5333,147 @@ fn matches_search(track: &tntron_core::Track, q: &str) -> bool {
         || track.title.to_ascii_lowercase().contains(q)
         || track.artist.to_ascii_lowercase().contains(q)
         || track.filename.to_ascii_lowercase().contains(q)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OverlayHost {
+    Home,
+    Extension { ext_id: String, tab_id: String },
+}
+
+/// Maps `+` / `better-*` extensions onto their base UI icon instead of creating duplicate sidebar buttons.
+fn overlay_host_for(ext_id: &str, all_tabs: &[ExtSidebarTab]) -> Option<OverlayHost> {
+    let find_tab = |target_ext: &str| {
+        all_tabs
+            .iter()
+            .find(|t| t.ext_id == target_ext)
+            .map(|t| OverlayHost::Extension {
+                ext_id: t.ext_id.clone(),
+                tab_id: t.id.clone(),
+            })
+    };
+    match ext_id {
+        "openify.better-home" => Some(OverlayHost::Home),
+        "openify.better-lyrics" => find_tab("openify.lyrics"),
+        "openify.better-visualizer" => find_tab("openify.visualizer"),
+        "openify.better-library" => find_tab("tunotron.playlists"),
+        "openify.better-folders" => {
+            find_tab("tunotron.playlists").or_else(|| find_tab("openify.better-library"))
+        }
+        _ => None,
+    }
+}
+
+fn overlays_for_home(all_tabs: &[ExtSidebarTab]) -> Vec<&ExtSidebarTab> {
+    all_tabs
+        .iter()
+        .filter(|t| overlay_host_for(&t.ext_id, all_tabs) == Some(OverlayHost::Home))
+        .collect()
+}
+
+fn overlays_for_ext_tab<'a>(
+    all_tabs: &'a [ExtSidebarTab],
+    base_ext_id: &str,
+) -> Vec<&'a ExtSidebarTab> {
+    all_tabs
+        .iter()
+        .filter(|t| {
+            matches!(
+                overlay_host_for(&t.ext_id, all_tabs),
+                Some(OverlayHost::Extension { ext_id, .. }) if ext_id == base_ext_id
+            )
+        })
+        .collect()
+}
+
+/// Loads `.png`/`.jpg`/`.webp`, `.jxl` (via `djxl`/`magick`), and `.svg` (via `magick`/`rsvg-convert`) into `image::Handle`.
+fn is_ui_hidden(snap: &UiSnapshot) -> bool {
+    snap.layout.hide_ui || (snap.transparency.enabled && snap.transparency.hide_ui)
+}
+
+fn decode_any_image_handle(raw: &str) -> Option<image::Handle> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let resolved = if let Some(rest) = trimmed.strip_prefix("~/") {
+        let home = std::env::var_os("HOME")?;
+        PathBuf::from(home).join(rest)
+    } else if trimmed == "~" {
+        PathBuf::from(std::env::var_os("HOME")?)
+    } else {
+        PathBuf::from(trimmed)
+    };
+    if !resolved.is_file() {
+        return None;
+    }
+    let ext = resolved
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+
+    if ext == "jxl" {
+        let tmp = std::env::temp_dir().join(format!("tntron_jxl_{}.png", std::process::id()));
+        if let Ok(status) = std::process::Command::new("djxl")
+            .arg(&resolved)
+            .arg(&tmp)
+            .status()
+        {
+            if status.success() {
+                let bytes = std::fs::read(&tmp).ok();
+                let _ = std::fs::remove_file(&tmp);
+                if let Some(b) = bytes {
+                    return Some(image::Handle::from_bytes(b));
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&tmp);
+        if let Ok(out) = std::process::Command::new("magick")
+            .arg(&resolved)
+            .arg("png:-")
+            .output()
+        {
+            if out.status.success() && !out.stdout.is_empty() {
+                return Some(image::Handle::from_bytes(out.stdout));
+            }
+        }
+        return None;
+    }
+
+    if ext == "svg" {
+        if let Ok(out) = std::process::Command::new("magick")
+            .args(["-background", "none"])
+            .arg(&resolved)
+            .args(["-resize", "256x256", "png:-"])
+            .output()
+        {
+            if out.status.success() && !out.stdout.is_empty() {
+                return Some(image::Handle::from_bytes(out.stdout));
+            }
+        }
+        if let Ok(out) = std::process::Command::new("rsvg-convert")
+            .args(["-w", "256", "-h", "256"])
+            .arg(&resolved)
+            .output()
+        {
+            if out.status.success() && !out.stdout.is_empty() {
+                return Some(image::Handle::from_bytes(out.stdout));
+            }
+        }
+        return None;
+    }
+
+    let bytes = std::fs::read(&resolved).ok()?;
+    Some(image::Handle::from_bytes(bytes))
+}
+
+fn fmt_duration_words(sec: u64) -> String {
+    let m = sec / 60;
+    let h = m / 60;
+    if h > 0 {
+        format!("{h}h {}m {}s", m % 60, sec % 60)
+    } else {
+        format!("{m}m {:02}s", sec % 60)
+    }
 }

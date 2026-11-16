@@ -1,0 +1,11 @@
+{
+  "id": "tntron.popup-player",
+  "name": "Popup Terminal Player",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Audio-reactive terminal popup mini player for kitty, alacritty, wezterm, foot, ghostty, konsole, gnome-terminal, and xterm with cover art and live lyrics.",
+  "author": "tntron",
+  "main": "main.lua",
+  "permissions": ["playback:read", "ui:sidebar", "storage", "notify"],
+  "requires": []
+}

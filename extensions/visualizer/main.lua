@@ -31,10 +31,11 @@ local function render(pb)
             tntron.ui.visualizer(st.mode, { playing = playing, volume = vol, speed = spd }),
             tntron.ui.progress("Signal Energy", master_pct, 100),
             tntron.ui.row({
-                tntron.ui.button("mode:bars",      "Bars",      { icon = "bars",  active = st.mode == "bars" }),
-                tntron.ui.button("mode:wave",      "Wave",      { icon = "wave",  active = st.mode == "wave" }),
-                tntron.ui.button("mode:circle",    "Circle",    { icon = "disc",  active = st.mode == "circle" }),
-                tntron.ui.button("mode:particles", "Particles", { icon = "music", active = st.mode == "particles" }),
+                tntron.ui.button("mode:bars",      "Bars",       { icon = "bars",  active = st.mode == "bars" }),
+                tntron.ui.button("mode:wave",      "Wave",       { icon = "wave",  active = st.mode == "wave" }),
+                tntron.ui.button("mode:circle",    "Circle",     { icon = "disc",  active = st.mode == "circle" }),
+                tntron.ui.button("mode:particles", "Particles",  { icon = "music", active = st.mode == "particles" }),
+                tntron.ui.button("mode:gif",       "GIF Shower", { icon = "play",  active = st.mode == "gif" }),
             }),
             tntron.ui.toggle("topbar_toggle", "Show live visualizer badge in top bar", st.topbar),
         },
@@ -56,7 +57,7 @@ function on_action(_ctx, action_id, val)
         st.mode = action_id:sub(6)
         tntron.storage.set("mode", st.mode)
     elseif action_id == "cycle_mode" then
-        local order = { bars = "wave", wave = "circle", circle = "particles", particles = "bars" }
+        local order = { bars = "wave", wave = "circle", circle = "particles", particles = "gif", gif = "bars" }
         st.mode = order[st.mode] or "bars"
         tntron.storage.set("mode", st.mode)
     elseif action_id == "topbar_toggle" then

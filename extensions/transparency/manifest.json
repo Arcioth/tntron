@@ -1,0 +1,11 @@
+{
+  "id": "tntron.transparency",
+  "name": "Glass & Transparency",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Control app transparency per color layer (window base, panels, cards, player bar, accent, text) with live % opaque/transparent readout.",
+  "author": "tntron",
+  "main": "main.lua",
+  "permissions": ["ui:sidebar", "storage", "notify"],
+  "requires": []
+}

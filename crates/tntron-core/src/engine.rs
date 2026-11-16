@@ -9,6 +9,10 @@ use crate::audio::{run_mpv_actor, MpvActorEvent, MpvCommand, MpvEvent, MpvSuperv
 use crate::clock::{
     AbLoop, AudioPreset, DspSettings, LoopMode, PlayState, PlaybackClock, ShuffleMode, XorShift64,
 };
+use crate::discord_rpc::{
+    build_preview, spawn_discord_worker, DiscordPlaybackState, DiscordPreview, DiscordStatusHandle,
+    DiscordWorkerMsg,
+};
 use crate::ext_api::{
     ExtFolderSummary, ExtHostCommand, ExtLibraryCtx, ExtPlaybackCtx, ExtRegisteredTheme,
     ExtSettingsPanel, ExtSidebarTab, ExtSlotBadge, ExtTrackSummary, ExtensionCardInfo,
@@ -18,7 +22,7 @@ use crate::hardware::{
     daeboard_start_sync, daeboard_stop_sync, daetron_reload_sync, daetron_start_sync,
     spawn_hardware_worker, HardwareCmd,
 };
-use crate::ipc::{run_ipc_server, write_status_file, TntronStatus};
+use crate::ipc::{default_cover_cache_path, run_ipc_server, write_status_file, TntronStatus};
 use crate::library::{
     analyze_track_blocking, copy_track_to_folder_in_jail, create_folder_in_jail,
     delete_file_in_jail, delete_folder_in_jail, load_companion_lrc, read_directory, rename_in_jail,
@@ -27,8 +31,11 @@ use crate::library::{
 };
 use crate::network;
 use crate::storage::{
-    default_extensions_dir, default_preferences_export_path, default_state_path, LayoutConfig,
-    PersistentState, SpeedPreset, TrackSort,
+    default_extensions_dir, default_popup_config_path, default_preferences_export_path,
+    default_state_path, default_tnt_dir, export_full_tnt_bundle, format_tnt_share_json,
+    import_full_tnt_bundle, parse_tnt_share_json, ButtonPackConfig, DiscordRpcConfig,
+    IconPackConfig, LayoutConfig, LogoConfig, PersistentState, PopupPlayerConfig, ProfileConfig,
+    ProfileTrackStat, ReactiveUiConfig, SpeedPreset, TrackSort, TransparencyConfig,
 };
 
 #[derive(Debug, Clone)]
@@ -38,6 +45,12 @@ pub enum AsyncExtJob {
         title: String,
         artist: String,
         duration_sec: f64,
+        provider: Option<String>,
+    },
+    LyricsTranslate {
+        path: String,
+        target_lang: String,
+        lines: Vec<String>,
     },
     FetchRss {
         url: String,
@@ -88,6 +101,8 @@ pub struct CommandEffects {
     pub track_asset_target: Option<PathBuf>,
     pub ext_jobs: Vec<(String, AsyncExtJob)>,
     pub open_ext_tab: Option<(String, String)>,
+    pub clipboard_copy: Option<String>,
+    pub clipboard_paste_ext: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +149,10 @@ pub enum CoreCommand {
     DeleteSpeedPreset(String),
     UpdateLayoutConfig(LayoutConfig),
     ResetLayoutConfig,
+    ToggleHideUi,
+    UpdateDiscordRpcConfig(DiscordRpcConfig),
+    ReconnectDiscordRpc,
+    ResetDiscordRpcConfig,
     SetTrackBpm { path: PathBuf, bpm: f64 },
     CycleLoopMode,
     ToggleShuffle,
@@ -159,6 +178,20 @@ pub enum CoreCommand {
     LocatePlayingTrack,
     ExportPreferences,
     ImportPreferences,
+    ExportFullTnt(String),
+    ImportFullTnt(String),
+    UpdateProfile {
+        name: Option<String>,
+        bio: Option<String>,
+        avatar_path: Option<Option<String>>,
+        avatar_size: Option<f32>,
+        avatar_shape: Option<String>,
+        avatar_fit: Option<String>,
+    },
+    ResetProfileStats,
+    CopyProfileStatsTnt,
+    ImportProfileStatsTnt(String),
+    ResolvePendingProfileImport(bool),
     ToggleExtension(String),
     ReloadExtensions,
     TriggerExtAction {
@@ -196,6 +229,16 @@ pub struct UiSnapshot {
     pub preserve_formant: bool,
     pub speed_presets: Vec<SpeedPreset>,
     pub layout: LayoutConfig,
+    pub reactive_ui: ReactiveUiConfig,
+    pub icon_pack: IconPackConfig,
+    pub button_pack: ButtonPackConfig,
+    pub logo: LogoConfig,
+    pub discord_rpc: DiscordRpcConfig,
+    pub discord_preview: DiscordPreview,
+    pub profile: ProfileConfig,
+    pub pending_profile_import: Option<ProfileConfig>,
+    pub transparency: TransparencyConfig,
+    pub popup_player: PopupPlayerConfig,
     pub analysis: Option<Arc<TrackAnalysis>>,
     pub track_bpm: Option<f64>,
     pub track_energy: f64,
@@ -243,6 +286,10 @@ pub enum CoreUpdate {
         ext_id: String,
         tab_id: String,
     },
+    CopyToClipboard(String),
+    RequestClipboardPaste {
+        ext_id: String,
+    },
 }
 
 pub struct CoreState {
@@ -286,11 +333,16 @@ pub struct CoreState {
     pub active_analysis: Option<Arc<TrackAnalysis>>,
     pub active_lyrics: Vec<LyricLine>,
     pub manual_bpms: HashMap<PathBuf, f64>,
+    pub cover_cache_path: Option<PathBuf>,
+    popup_child: Option<std::process::Child>,
     hw_tx: Option<mpsc::Sender<HardwareCmd>>,
+    discord_tx: Option<mpsc::Sender<DiscordWorkerMsg>>,
+    discord_status: Option<DiscordStatusHandle>,
     pub error_banner: Option<String>,
-    ignore_next_end_file: bool,
     next_toast_id: u64,
     ext_tick_divider: u8,
+    stats_tick_divider: u8,
+    pending_profile_import: Option<ProfileConfig>,
     dirty_persist: bool,
 }
 
@@ -358,13 +410,19 @@ impl CoreState {
             active_analysis: None,
             active_lyrics: Vec::new(),
             manual_bpms: HashMap::new(),
+            cover_cache_path: None,
+            popup_child: None,
             hw_tx: None,
+            discord_tx: None,
+            discord_status: None,
             error_banner: None,
-            ignore_next_end_file: false,
             next_toast_id: 1,
             ext_tick_divider: 0,
+            stats_tick_divider: 0,
+            pending_profile_import: None,
             dirty_persist: false,
         };
+        state.migrate_legacy_listening_stats();
 
         state.refresh_root_folders();
         state.refresh_all_tracks();
@@ -381,6 +439,7 @@ impl CoreState {
             );
             let mut boot_fx = CommandEffects::default();
             state.apply_ext_commands(cmds, &mut boot_fx);
+            state.reconcile_ext_owned_state();
         }
         state
     }
@@ -421,6 +480,34 @@ impl CoreState {
             .iter()
             .rfind(|l| l.time_sec <= pos && !l.text.trim().is_empty())
             .map(|l| l.text.trim().to_string())
+    }
+
+    pub fn current_lyrics_window(&self) -> Vec<String> {
+        if self.active_lyrics.is_empty() {
+            return Vec::new();
+        }
+        let pos = self.clock.now() + 0.15;
+        let idx = self
+            .active_lyrics
+            .iter()
+            .rposition(|l| l.time_sec <= pos && !l.text.trim().is_empty())
+            .unwrap_or(0);
+        let start = idx.saturating_sub(1);
+        let end = (idx + 4).min(self.active_lyrics.len());
+        self.active_lyrics[start..end]
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, l)| {
+                let t = l.text.trim();
+                if t.is_empty() {
+                    None
+                } else if start + offset == idx && l.time_sec <= pos {
+                    Some(format!("> {t}"))
+                } else {
+                    Some(format!("  {t}"))
+                }
+            })
+            .collect()
     }
 
     pub fn current_track_bpm(&self) -> Option<f64> {
@@ -507,6 +594,48 @@ impl CoreState {
                 .or_else(|| self.current_track.as_ref().and_then(|t| t.channels)),
             beat_pulse,
             bands,
+        }
+    }
+
+    pub fn discord_playback_state(&self) -> DiscordPlaybackState {
+        let codec = self.mpv_audio_telemetry_label();
+        DiscordPlaybackState {
+            playing: self.play_state,
+            title: self
+                .current_track
+                .as_ref()
+                .map(|t| t.title.clone())
+                .unwrap_or_default(),
+            artist: self
+                .current_track
+                .as_ref()
+                .map(|t| t.artist.clone())
+                .unwrap_or_default(),
+            album: self
+                .current_track
+                .as_ref()
+                .map(|t| t.album.clone())
+                .unwrap_or_default(),
+            position_sec: self.clock.now(),
+            duration_sec: self.duration_sec,
+            codec,
+            bpm: self.current_track_bpm(),
+            speed: self.speed,
+            pitch_st: self.persisted.pitch_st,
+            loop_mode: self.loop_mode,
+            shuffle_mode: self.shuffle_mode,
+            track_index: self.active_playlist_index,
+            playlist_len: self.active_playlist.len(),
+            queue_len: self.queue.len(),
+        }
+    }
+
+    pub fn sync_discord_rpc(&self) {
+        if let Some(tx) = &self.discord_tx {
+            let _ = tx.try_send(DiscordWorkerMsg::Sync {
+                cfg: Box::new(self.persisted.discord_rpc.clone()),
+                playback: Box::new(self.discord_playback_state()),
+            });
         }
     }
 
@@ -648,8 +777,8 @@ impl CoreState {
             tr.title = title;
             tr.artist = "YouTube".into();
             let arc = Arc::new(tr);
-            fx.mpv_cmds.push(self.start_track(arc, None));
-            self.dispatch_ext_event("trackChange", &mut fx);
+            let cmd = self.start_track(arc, None);
+            self.emit_track_start(&mut fx, cmd);
         }
         if res.rescan_after {
             fx.scan_paths = self.load_current_dir();
@@ -791,15 +920,24 @@ impl CoreState {
                             .to_string();
                         tr.artist = "Network Stream".to_string();
                         let arc = Arc::new(tr);
-                        fx.mpv_cmds.push(self.start_track(arc, None));
-                        self.dispatch_ext_event("trackChange", fx);
+                        let cmd = self.start_track(arc, None);
+                        self.emit_track_start(fx, cmd);
                     } else if let Some(jailed) = resolve_in_jail(&self.music_root, Path::new(&path)) {
                         if Track::is_audio_file(&jailed) {
+                            if !self.active_playlist.iter().any(|t| t.path == jailed) {
+                                if let Some(parent) = jailed.parent() {
+                                    self.current_dir = parent.to_path_buf();
+                                    fx.scan_paths = self.load_current_dir();
+                                    self.activate_current_dir_playlist();
+                                }
+                            }
                             let pl_idx = self.active_playlist.iter().position(|t| t.path == jailed);
+                            if self.shuffle_mode == ShuffleMode::On {
+                                self.rebuild_shuffle_deck(pl_idx);
+                            }
                             let track = self.resolve_track_arc(&jailed);
-                            fx.track_asset_target = Some(track.path.clone());
-                            fx.mpv_cmds.push(self.start_track(track, pl_idx));
-                            self.dispatch_ext_event("trackChange", fx);
+                            let cmd = self.start_track(track, pl_idx);
+                            self.emit_track_start(fx, cmd);
                         }
                     }
                 }
@@ -888,6 +1026,7 @@ impl CoreState {
                     title,
                     artist,
                     duration_sec,
+                    provider,
                 } => {
                     fx.ext_jobs.push((
                         ext_id,
@@ -896,6 +1035,21 @@ impl CoreState {
                             title,
                             artist,
                             duration_sec,
+                            provider,
+                        },
+                    ));
+                }
+                ExtHostCommand::LyricsTranslate {
+                    path,
+                    target_lang,
+                    lines,
+                } => {
+                    fx.ext_jobs.push((
+                        ext_id,
+                        AsyncExtJob::LyricsTranslate {
+                            path,
+                            target_lang,
+                            lines,
                         },
                     ));
                 }
@@ -978,6 +1132,54 @@ impl CoreState {
                         self.persisted.view_density = d.to_string();
                     }
                     self.dirty_persist = true;
+                }
+                ExtHostCommand::UiSetReactiveConfig { patch } => {
+                    apply_reactive_patch(&mut self.persisted.reactive_ui, &patch);
+                    self.dirty_persist = true;
+                }
+                ExtHostCommand::UiSetIconConfig { patch } => {
+                    apply_icon_pack_patch(&mut self.persisted.icon_pack, &patch);
+                    self.dirty_persist = true;
+                }
+                ExtHostCommand::UiSetButtonConfig { patch } => {
+                    apply_button_pack_patch(&mut self.persisted.button_pack, &patch);
+                    self.dirty_persist = true;
+                }
+                ExtHostCommand::UiSetLogoConfig { patch } => {
+                    apply_logo_patch(&mut self.persisted.logo, &patch);
+                    self.dirty_persist = true;
+                }
+                ExtHostCommand::UiCopyClipboard { text } => {
+                    fx.clipboard_copy = Some(text);
+                }
+                ExtHostCommand::UiRequestClipboardPaste => {
+                    fx.clipboard_paste_ext = Some(ext_id);
+                }
+                ExtHostCommand::UiSetTransparencyConfig { patch } => {
+                    apply_transparency_patch(&mut self.persisted.transparency, &patch);
+                    if let Some(b) = patch.get("hide_ui").and_then(|v| v.as_bool()) {
+                        self.persisted.layout.hide_ui = b;
+                    }
+                    self.dirty_persist = true;
+                }
+                ExtHostCommand::UiSetPopupConfig { patch } => {
+                    apply_popup_patch(&mut self.persisted.popup_player, &patch);
+                    let _ = self
+                        .persisted
+                        .popup_player
+                        .save_atomic(&default_popup_config_path());
+                    if !self.persisted.popup_player.enabled {
+                        self.close_popup_terminal();
+                    }
+                    self.dirty_persist = true;
+                }
+                ExtHostCommand::PopupLaunch => match self.launch_popup_terminal() {
+                    Ok(msg) => self.push_toast(msg, false),
+                    Err(err) => self.push_toast(err, true),
+                },
+                ExtHostCommand::PopupClose => {
+                    self.close_popup_terminal();
+                    self.push_toast("Closed terminal popup player", false);
                 }
                 ExtHostCommand::UiOpenSidebar { tab_id } => {
                     fx.open_ext_tab = Some((ext_id, tab_id));
@@ -1151,6 +1353,31 @@ impl CoreState {
         }
     }
 
+    fn reconcile_ext_owned_state(&mut self) {
+        let enabled = self.ext_host.enabled_ids();
+        let has = |id: &str| enabled.iter().any(|x| x == id);
+        if !has("tntron.reactive-ui") {
+            self.persisted.reactive_ui.enabled = false;
+        }
+        if !has("tntron.icon-packs") {
+            self.persisted.icon_pack = IconPackConfig::default();
+        }
+        if !has("tntron.button-packs") {
+            self.persisted.button_pack = ButtonPackConfig::default();
+        }
+        if !has("tntron.better-themes") {
+            self.persisted.logo = LogoConfig::default();
+        }
+        if !has("tntron.transparency") {
+            self.persisted.transparency.enabled = false;
+            self.persisted.transparency.hide_ui = false;
+        }
+        if !has("tntron.popup-player") {
+            self.persisted.popup_player.enabled = false;
+            self.close_popup_terminal();
+        }
+    }
+
     fn exec_set_all_extensions(
         &mut self,
         enabled: bool,
@@ -1175,6 +1402,7 @@ impl CoreState {
                 }
             }
         }
+        self.reconcile_ext_owned_state();
         fx.mpv_cmds
             .push(MpvCommand::SetAudioFilter(self.effective_audio_filter()));
         self.dirty_persist = true;
@@ -1197,6 +1425,123 @@ impl CoreState {
                 false,
             ),
             Err(e) => self.push_toast(format!("Export failed: {e}"), true),
+        }
+    }
+
+    fn exec_export_full_tnt(&mut self, name_or_path: &str) {
+        self.persisted.enabled_extensions = self.ext_host.enabled_ids();
+        let target = if name_or_path.trim().is_empty() {
+            "tntron_full_backup"
+        } else {
+            name_or_path.trim()
+        };
+        match export_full_tnt_bundle(
+            target,
+            &self.persisted,
+            &self.extensions_dir,
+            &default_tnt_dir(),
+        ) {
+            Ok(path) => self.push_toast(
+                format!("Exported full .tnt bundle -> {}", path.display()),
+                false,
+            ),
+            Err(e) => self.push_toast(format!("Full .tnt export failed: {e}"), true),
+        }
+    }
+
+    fn migrate_legacy_listening_stats(&mut self) {
+        if self.persisted.profile.has_stats() {
+            return;
+        }
+        let Some(ls) = self
+            .persisted
+            .extension_storage
+            .get("tunotron.listening-stats")
+        else {
+            return;
+        };
+        let sec = ls
+            .get("total_sec")
+            .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
+            .unwrap_or(0);
+        let mut total_plays = 0u64;
+        if let Some(plays) = ls.get("plays").and_then(|v| v.as_object()) {
+            for (path, info) in plays {
+                let cnt = info
+                    .get("count")
+                    .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
+                    .unwrap_or(0);
+                if cnt > 0 {
+                    total_plays = total_plays.saturating_add(cnt);
+                    self.persisted.profile.stats_track_plays.insert(
+                        path.clone(),
+                        ProfileTrackStat {
+                            title: info
+                                .get("title")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(path)
+                                .to_string(),
+                            artist: info
+                                .get("artist")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            count: cnt,
+                        },
+                    );
+                }
+            }
+        }
+        self.persisted.profile.stats_total_sec = sec;
+        self.persisted.profile.stats_total_plays = total_plays;
+    }
+
+    fn exec_import_full_tnt(&mut self, name_or_path: &str, fx: &mut CommandEffects) {
+        let target = if name_or_path.trim().is_empty() {
+            "tntron_full_backup"
+        } else {
+            name_or_path.trim()
+        };
+        match import_full_tnt_bundle(target, &self.extensions_dir, &default_tnt_dir()) {
+            Ok((bundle, ext_count)) => {
+                // Keep existing local profile/stats by default; prompt once for approval if stats exist.
+                let current_profile = self.persisted.profile.clone();
+                let imported_profile = bundle.state.profile.clone().clamped();
+                self.persisted = bundle.state;
+                self.persisted.profile = current_profile;
+                self.persisted.home_layout = normalize_home_layout(&self.persisted.home_layout);
+                self.dirty_persist = true;
+                self.sort_entries();
+                self.apply_dsp_cmds(fx);
+                self.ext_host.discover(&self.extensions_dir);
+                self.ext_audio_filters.clear();
+                let saved = self.persisted.enabled_extensions.clone();
+                let pb = self.ext_playback_ctx();
+                let lib = self.ext_library_ctx();
+                let cmds = self.ext_host.enable_saved(
+                    &saved,
+                    &pb,
+                    &lib,
+                    &self.persisted.extension_storage,
+                );
+                self.apply_ext_commands(cmds, fx);
+                self.reconcile_ext_owned_state();
+                fx.mpv_cmds
+                    .push(MpvCommand::SetAudioFilter(self.effective_audio_filter()));
+                if imported_profile.has_stats() {
+                    self.pending_profile_import = Some(imported_profile);
+                    self.push_toast(
+                        format!("Imported .tnt ({ext_count} extensions). Approve profile stats import?"),
+                        false,
+                    );
+                } else {
+                    self.push_toast(
+                        format!("Imported .tnt bundle ({ext_count} extensions & all settings)"),
+                        false,
+                    );
+                }
+            }
+            Err(e) => self.push_toast(format!("Import .tnt failed: {e}"), true),
         }
     }
 
@@ -1233,6 +1578,7 @@ impl CoreState {
             &self.persisted.extension_storage,
         );
         self.apply_ext_commands(cmds, fx);
+        self.reconcile_ext_owned_state();
         fx.mpv_cmds
             .push(MpvCommand::SetAudioFilter(self.effective_audio_filter()));
         self.push_toast("Imported preferences & reloaded extensions", false);
@@ -1438,6 +1784,18 @@ impl CoreState {
             .as_ref()
             .and_then(|t| self.persisted.saved_loops.get(&t.path).copied());
 
+        let (discord_connected, discord_socket) = self
+            .discord_status
+            .as_ref()
+            .map(|h| (h.is_connected(), h.socket_label_blocking()))
+            .unwrap_or((false, None));
+        let discord_preview = build_preview(
+            &self.persisted.discord_rpc,
+            &self.discord_playback_state(),
+            discord_connected,
+            discord_socket,
+        );
+
         UiSnapshot {
             music_root: self.music_root.clone(),
             current_dir: self.current_dir.clone(),
@@ -1458,6 +1816,16 @@ impl CoreState {
             preserve_formant: self.persisted.preserve_formant,
             speed_presets: self.persisted.speed_presets.clone(),
             layout: self.persisted.layout.clone(),
+            reactive_ui: self.persisted.reactive_ui.clone(),
+            icon_pack: self.persisted.icon_pack.clone(),
+            button_pack: self.persisted.button_pack.clone(),
+            logo: self.persisted.logo.clone(),
+            discord_rpc: self.persisted.discord_rpc.clone(),
+            discord_preview,
+            profile: self.persisted.profile.clone(),
+            pending_profile_import: self.pending_profile_import.clone(),
+            transparency: self.persisted.transparency.clone(),
+            popup_player: self.persisted.popup_player.clone(),
             analysis: self.active_analysis.clone(),
             track_bpm: self.current_track_bpm(),
             track_energy: self
@@ -1538,14 +1906,44 @@ impl CoreState {
             self.persisted.recent_tracks.retain(|x| x != p);
             self.persisted.recent_tracks.insert(0, p.clone());
             self.persisted.recent_tracks.truncate(30);
+        }
+        let key = p.to_string_lossy().into_owned();
+        if !key.is_empty() {
+            self.persisted.profile.stats_total_plays =
+                self.persisted.profile.stats_total_plays.saturating_add(1);
+            let entry = self
+                .persisted
+                .profile
+                .stats_track_plays
+                .entry(key)
+                .or_insert_with(|| ProfileTrackStat {
+                    title: track.title.clone(),
+                    artist: track.artist.clone(),
+                    count: 0,
+                });
+            entry.title = track.title.clone();
+            entry.artist = track.artist.clone();
+            entry.count = entry.count.saturating_add(1);
             self.dirty_persist = true;
         }
     }
 
-    fn start_track(&mut self, track: Arc<Track>, playlist_idx: Option<usize>) -> MpvCommand {
-        if self.current_track.is_some() && self.play_state != PlayState::Stopped {
-            self.ignore_next_end_file = true;
+    fn emit_track_start(&mut self, fx: &mut CommandEffects, load_cmd: MpvCommand) {
+        if let Some(cur) = &self.current_track {
+            let path_str = cur.path.to_string_lossy();
+            if !path_str.starts_with("http://")
+                && !path_str.starts_with("https://")
+                && cur.path.exists()
+            {
+                fx.track_asset_target = Some(cur.path.clone());
+            }
         }
+        fx.mpv_cmds.push(load_cmd);
+        fx.mpv_cmds.push(MpvCommand::SetPause(false));
+        self.dispatch_ext_event("trackChange", fx);
+    }
+
+    fn start_track(&mut self, track: Arc<Track>, playlist_idx: Option<usize>) -> MpvCommand {
         self.active_playlist_index = playlist_idx;
         self.record_track_play(&track);
         self.duration_sec = track.duration_sec;
@@ -1645,6 +2043,7 @@ impl CoreState {
         self.clock.sync(0.0);
         self.current_track = None;
         self.cover_art = None;
+        self.cover_cache_path = None;
         self.ab_loop.clear();
         self.duration_sec = 0.0;
     }
@@ -1749,9 +2148,8 @@ impl CoreState {
                             if self.shuffle_mode == ShuffleMode::On {
                                 self.rebuild_shuffle_deck(pl_idx);
                             }
-                            fx.track_asset_target = Some(track.path.clone());
-                            fx.mpv_cmds.push(self.start_track(track, pl_idx));
-                            self.dispatch_ext_event("trackChange", &mut fx);
+                            let cmd = self.start_track(track, pl_idx);
+                            self.emit_track_start(&mut fx, cmd);
                         }
                     }
                 }
@@ -1765,9 +2163,8 @@ impl CoreState {
                     }
                     let pl_idx = self.active_playlist.iter().position(|t| t.path == jailed);
                     let track = self.resolve_track_arc(&jailed);
-                    fx.track_asset_target = Some(track.path.clone());
-                    fx.mpv_cmds.push(self.start_track(track, pl_idx));
-                    self.dispatch_ext_event("trackChange", &mut fx);
+                    let cmd = self.start_track(track, pl_idx);
+                    self.emit_track_start(&mut fx, cmd);
                 }
             }
             CoreCommand::PlayFolder { path, shuffle } => {
@@ -1776,26 +2173,20 @@ impl CoreState {
                         self.current_dir = jailed;
                         fx.scan_paths = self.load_current_dir();
                         if let Some(mc) = self.play_dir_internal(shuffle) {
-                            fx.track_asset_target = self.current_track.as_ref().map(|t| t.path.clone());
-                            fx.mpv_cmds.push(mc);
-                            self.dispatch_ext_event("trackChange", &mut fx);
+                            self.emit_track_start(&mut fx, mc);
                         }
                     }
                 }
             }
             CoreCommand::PlayAllInDir { shuffle } => {
                 if let Some(mc) = self.play_dir_internal(shuffle) {
-                    fx.track_asset_target = self.current_track.as_ref().map(|t| t.path.clone());
-                    fx.mpv_cmds.push(mc);
-                    self.dispatch_ext_event("trackChange", &mut fx);
+                    self.emit_track_start(&mut fx, mc);
                 }
             }
             CoreCommand::PlayFavorites { shuffle } => {
                 let favs = self.persisted.favorites.clone();
                 if let Some(mc) = self.play_path_list(&favs, None, shuffle) {
-                    fx.track_asset_target = self.current_track.as_ref().map(|t| t.path.clone());
-                    fx.mpv_cmds.push(mc);
-                    self.dispatch_ext_event("trackChange", &mut fx);
+                    self.emit_track_start(&mut fx, mc);
                 } else {
                     self.push_toast("No playable favorite tracks yet", true);
                 }
@@ -1804,16 +2195,14 @@ impl CoreState {
                 if idx < self.queue.len() {
                     let track = self.queue.remove(idx);
                     let pl_idx = self.active_playlist.iter().position(|t| t.path == track.path);
-                    fx.track_asset_target = Some(track.path.clone());
-                    fx.mpv_cmds.push(self.start_track(track, pl_idx));
-                    self.dispatch_ext_event("trackChange", &mut fx);
+                    let cmd = self.start_track(track, pl_idx);
+                    self.emit_track_start(&mut fx, cmd);
                 }
             }
             CoreCommand::PlayUpcomingIndex(idx) => {
                 if let Some(track) = self.active_playlist.get(idx).cloned() {
-                    fx.track_asset_target = Some(track.path.clone());
-                    fx.mpv_cmds.push(self.start_track(track, Some(idx)));
-                    self.dispatch_ext_event("trackChange", &mut fx);
+                    let cmd = self.start_track(track, Some(idx));
+                    self.emit_track_start(&mut fx, cmd);
                 }
             }
             CoreCommand::CreateFolder(name) => {
@@ -1875,9 +2264,7 @@ impl CoreState {
                     self.dispatch_ext_event("playbackStateChange", &mut fx);
                 } else if !self.entries.is_empty() {
                     if let Some(mc) = self.play_dir_internal(self.shuffle_mode == ShuffleMode::On) {
-                        fx.track_asset_target = self.current_track.as_ref().map(|t| t.path.clone());
-                        fx.mpv_cmds.push(mc);
-                        self.dispatch_ext_event("trackChange", &mut fx);
+                        self.emit_track_start(&mut fx, mc);
                     }
                 }
             }
@@ -1895,7 +2282,6 @@ impl CoreState {
             }
             CoreCommand::Stop => {
                 if self.current_track.is_some() {
-                    self.ignore_next_end_file = true;
                     self.stop_locally();
                     fx.mpv_cmds.push(MpvCommand::Stop);
                     self.dispatch_ext_event("playbackStateChange", &mut fx);
@@ -1903,16 +2289,12 @@ impl CoreState {
             }
             CoreCommand::NextTrack => {
                 if let Some(c) = self.advance_next(false) {
-                    fx.track_asset_target = self.current_track.as_ref().map(|t| t.path.clone());
-                    fx.mpv_cmds.push(c);
-                    self.dispatch_ext_event("trackChange", &mut fx);
+                    self.emit_track_start(&mut fx, c);
                 }
             }
             CoreCommand::PrevTrack => {
                 if let Some(c) = self.step_prev() {
-                    fx.track_asset_target = self.current_track.as_ref().map(|t| t.path.clone());
-                    fx.mpv_cmds.push(c);
-                    self.dispatch_ext_event("trackChange", &mut fx);
+                    self.emit_track_start(&mut fx, c);
                 }
             }
             CoreCommand::SeekDelta(delta) => {
@@ -2037,6 +2419,33 @@ impl CoreState {
                 self.persisted.home_layout = "table".to_string();
                 self.dirty_persist = true;
                 self.push_toast("Layout reset to defaults", false);
+            }
+            CoreCommand::ToggleHideUi => {
+                let currently_hidden = self.persisted.layout.hide_ui
+                    || (self.persisted.transparency.enabled && self.persisted.transparency.hide_ui);
+                let next = !currently_hidden;
+                self.persisted.layout.hide_ui = next;
+                if self.persisted.transparency.enabled {
+                    self.persisted.transparency.hide_ui = next;
+                }
+                self.dirty_persist = true;
+            }
+            CoreCommand::UpdateDiscordRpcConfig(cfg) => {
+                self.persisted.discord_rpc = cfg;
+                self.dirty_persist = true;
+            }
+            CoreCommand::ReconnectDiscordRpc => {
+                if let Some(tx) = &self.discord_tx {
+                    let _ = tx.try_send(DiscordWorkerMsg::ReconnectNow);
+                }
+                self.sync_discord_rpc();
+                self.push_toast("Refreshing Discord Rich Presence connection...", false);
+            }
+            CoreCommand::ResetDiscordRpcConfig => {
+                self.persisted.discord_rpc = DiscordRpcConfig::default();
+                self.dirty_persist = true;
+                self.sync_discord_rpc();
+                self.push_toast("Discord Rich Presence reset to defaults", false);
             }
             CoreCommand::SetTrackBpm { path, bpm } => {
                 if (30.0..=300.0).contains(&bpm) {
@@ -2202,6 +2611,98 @@ impl CoreState {
             CoreCommand::ImportPreferences => {
                 self.exec_import_preferences(&mut fx);
             }
+            CoreCommand::ExportFullTnt(target) => {
+                self.exec_export_full_tnt(&target);
+            }
+            CoreCommand::ImportFullTnt(target) => {
+                self.exec_import_full_tnt(&target, &mut fx);
+            }
+            CoreCommand::UpdateProfile {
+                name,
+                bio,
+                avatar_path,
+                avatar_size,
+                avatar_shape,
+                avatar_fit,
+            } => {
+                let pr = &mut self.persisted.profile;
+                if let Some(n) = name {
+                    let t = n.trim();
+                    if !t.is_empty() {
+                        pr.name = t.to_string();
+                    }
+                }
+                if let Some(b) = bio {
+                    pr.bio = b.trim().to_string();
+                }
+                if let Some(ap) = avatar_path {
+                    pr.avatar_path = ap.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+                }
+                if let Some(sz) = avatar_size {
+                    pr.avatar_size = sz;
+                }
+                if let Some(sh) = avatar_shape {
+                    pr.avatar_shape = sh;
+                }
+                if let Some(ft) = avatar_fit {
+                    pr.avatar_fit = ft;
+                }
+                self.persisted.profile = self.persisted.profile.clone().clamped();
+                self.dirty_persist = true;
+            }
+            CoreCommand::ResetProfileStats => {
+                self.persisted.profile.stats_total_sec = 0;
+                self.persisted.profile.stats_total_plays = 0;
+                self.persisted.profile.stats_track_plays.clear();
+                self.dirty_persist = true;
+                self.push_toast("Profile listening stats reset", false);
+            }
+            CoreCommand::CopyProfileStatsTnt => {
+                if let Ok(val) = serde_json::to_value(&self.persisted.profile) {
+                    if let Ok(txt) = format_tnt_share_json(
+                        "tntron-profile-v1",
+                        &self.persisted.profile.name,
+                        val,
+                    ) {
+                        fx.clipboard_copy = Some(txt);
+                        self.push_toast("Copied Profile & Stats (.tnt JSON) to clipboard", false);
+                    }
+                }
+            }
+            CoreCommand::ImportProfileStatsTnt(raw) => {
+                match parse_tnt_share_json(&raw) {
+                    Ok(val) => {
+                        let candidate_val = val.get("state").and_then(|s| s.get("profile")).unwrap_or(&val);
+                        match serde_json::from_value::<ProfileConfig>(candidate_val.clone()) {
+                            Ok(prof) => {
+                                let prof = prof.clamped();
+                                if prof.has_stats() {
+                                    self.pending_profile_import = Some(prof);
+                                } else {
+                                    self.persisted.profile.name = prof.name;
+                                    self.persisted.profile.bio = prof.bio;
+                                    self.persisted.profile.avatar_path = prof.avatar_path;
+                                    self.dirty_persist = true;
+                                    self.push_toast("Imported profile look", false);
+                                }
+                            }
+                            Err(e) => self.push_toast(format!("Invalid profile .tnt data: {e}"), true),
+                        }
+                    }
+                    Err(e) => self.push_toast(e, true),
+                }
+            }
+            CoreCommand::ResolvePendingProfileImport(approve) => {
+                if let Some(imported) = self.pending_profile_import.take() {
+                    if approve {
+                        self.persisted.profile = imported.clamped();
+                        self.dirty_persist = true;
+                        self.push_toast("Approved & imported profile listening stats", false);
+                    } else {
+                        self.push_toast("Kept existing profile & stats", false);
+                    }
+                }
+            }
             CoreCommand::ToggleExtension(id) => {
                 let pb = self.ext_playback_ctx();
                 let lib = self.ext_library_ctx();
@@ -2215,6 +2716,7 @@ impl CoreState {
                     self.ext_audio_filters.remove(&did);
                 }
                 self.apply_ext_commands(cmds, &mut fx);
+                self.reconcile_ext_owned_state();
                 fx.mpv_cmds
                     .push(MpvCommand::SetAudioFilter(self.effective_audio_filter()));
                 let card_info = self
@@ -2254,6 +2756,7 @@ impl CoreState {
                     &self.persisted.extension_storage,
                 );
                 self.apply_ext_commands(cmds, &mut fx);
+                self.reconcile_ext_owned_state();
                 fx.mpv_cmds
                     .push(MpvCommand::SetAudioFilter(self.effective_audio_filter()));
                 self.push_toast(
@@ -2349,6 +2852,19 @@ impl CoreState {
         self.toasts.retain(|t| t.expires_at > now);
         let mut ui_dirty = self.toasts.len() != prev_toasts;
 
+        self.stats_tick_divider = self.stats_tick_divider.saturating_add(1);
+        if self.stats_tick_divider >= 5 {
+            self.stats_tick_divider = 0;
+            if self.play_state == PlayState::Playing {
+                self.persisted.profile.stats_total_sec =
+                    self.persisted.profile.stats_total_sec.saturating_add(1);
+                if self.persisted.profile.stats_total_sec.is_multiple_of(10) {
+                    self.dirty_persist = true;
+                }
+                ui_dirty = true;
+            }
+        }
+
         if self.ext_host.has_enabled() {
             self.ext_tick_divider = self.ext_tick_divider.saturating_add(1);
             if self.ext_tick_divider >= 5 {
@@ -2431,21 +2947,13 @@ impl CoreState {
                 }
                 _ => {}
             },
-            MpvActorEvent::Event(MpvEvent::EndFile { reason, .. }) => {
-                if self.ignore_next_end_file {
-                    self.ignore_next_end_file = false;
-                } else if reason.as_deref() == Some("eof") {
-                    if let Some(c) = self.advance_next(true) {
-                        if let Some(cur) = &self.current_track {
-                            if cur.path.exists() {
-                                fx.track_asset_target = Some(cur.path.clone());
-                            }
-                        }
-                        fx.mpv_cmds.push(c);
-                        self.dispatch_ext_event("trackChange", &mut fx);
-                    } else {
-                        self.dispatch_ext_event("playbackStateChange", &mut fx);
-                    }
+            MpvActorEvent::Event(MpvEvent::EndFile { reason, .. })
+                if self.play_state != PlayState::Stopped && reason.as_deref() == Some("eof") =>
+            {
+                if let Some(c) = self.advance_next(true) {
+                    self.emit_track_start(&mut fx, c);
+                } else {
+                    self.dispatch_ext_event("playbackStateChange", &mut fx);
                 }
             }
             MpvActorEvent::Closed => {
@@ -2532,6 +3040,746 @@ fn apply_layout_patch(cfg: &mut LayoutConfig, patch: &serde_json::Value) {
     if let Some(z) = patch.get("toast_zone").and_then(|v| v.as_str()) {
         cfg.toast_zone = z.to_string();
     }
+    if let Some(b) = patch.get("show_topbar_hide_ui").and_then(|v| v.as_bool()) {
+        cfg.show_topbar_hide_ui = b;
+    }
+    if let Some(b) = patch.get("hide_ui").and_then(|v| v.as_bool()) {
+        cfg.hide_ui = b;
+    }
+}
+
+fn apply_reactive_patch(cfg: &mut ReactiveUiConfig, patch: &serde_json::Value) {
+    if let Some(b) = patch.get("enabled").and_then(|v| v.as_bool()) {
+        cfg.enabled = b;
+    }
+    if let Some(b) = patch.get("bass_glow").and_then(|v| v.as_bool()) {
+        cfg.bass_glow = b;
+    }
+    if let Some(n) = patch.get("bass_intensity").and_then(|v| v.as_f64()) {
+        cfg.bass_intensity = n as f32;
+    }
+    if let Some(n) = patch.get("bass_radius").and_then(|v| v.as_f64()) {
+        cfg.bass_radius = n as f32;
+    }
+    if let Some(b) = patch.get("eq_enabled").and_then(|v| v.as_bool()) {
+        cfg.eq_enabled = b;
+    }
+    if let Some(s) = patch.get("eq_style").and_then(|v| v.as_str()) {
+        cfg.eq_style = s.to_string();
+    }
+    if let Some(s) = patch.get("eq_sides").and_then(|v| v.as_str()) {
+        cfg.eq_sides = s.to_string();
+    }
+    if let Some(n) = patch.get("eq_width").and_then(|v| v.as_f64()) {
+        cfg.eq_width = n as f32;
+    }
+    if let Some(n) = patch.get("eq_opacity").and_then(|v| v.as_f64()) {
+        cfg.eq_opacity = n as f32;
+    }
+    if let Some(n) = patch.get("blur").and_then(|v| v.as_f64()) {
+        cfg.blur = n as f32;
+    }
+    if let Some(b) = patch.get("particles_enabled").and_then(|v| v.as_bool()) {
+        cfg.particles_enabled = b;
+    }
+    if let Some(n) = patch.get("particle_count").and_then(|v| v.as_u64()) {
+        cfg.particle_count = n as usize;
+    } else if let Some(n) = patch.get("particle_count").and_then(|v| v.as_f64()) {
+        cfg.particle_count = n.round().max(0.0) as usize;
+    }
+    if let Some(n) = patch.get("particle_zoom").and_then(|v| v.as_f64()) {
+        cfg.particle_zoom = n as f32;
+    }
+    if let Some(b) = patch.get("glow_particles_enabled").and_then(|v| v.as_bool()) {
+        cfg.glow_particles_enabled = b;
+    }
+    if let Some(n) = patch.get("glow_particle_intensity").and_then(|v| v.as_f64()) {
+        cfg.glow_particle_intensity = n as f32;
+    }
+    if let Some(n) = patch.get("glow_particle_size").and_then(|v| v.as_f64()) {
+        cfg.glow_particle_size = n as f32;
+    }
+    if let Some(s) = patch.get("glow_particle_style").and_then(|v| v.as_str()) {
+        cfg.glow_particle_style = s.to_string();
+    }
+    if let Some(b) = patch.get("aurora_enabled").and_then(|v| v.as_bool()) {
+        cfg.aurora_enabled = b;
+    }
+    if let Some(b) = patch.get("custom_particle_enabled").and_then(|v| v.as_bool()) {
+        cfg.custom_particle_enabled = b;
+    }
+    if let Some(p) = patch.get("custom_particle_path") {
+        cfg.custom_particle_path = p
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+    }
+    if let Some(n) = patch.get("custom_particle_size").and_then(|v| v.as_f64()) {
+        cfg.custom_particle_size = n as f32;
+    }
+    if let Some(n) = patch.get("custom_particle_count").and_then(|v| v.as_u64()) {
+        cfg.custom_particle_count = n as usize;
+    } else if let Some(n) = patch.get("custom_particle_count").and_then(|v| v.as_f64()) {
+        cfg.custom_particle_count = n.round().max(1.0) as usize;
+    }
+    if let Some(b) = patch.get("hue_loop").and_then(|v| v.as_bool()) {
+        cfg.hue_loop = b;
+    }
+    if let Some(n) = patch.get("hue_speed").and_then(|v| v.as_f64()) {
+        cfg.hue_speed = n as f32;
+    }
+    if let Some(n) = patch.get("hue_vocal_react").and_then(|v| v.as_f64()) {
+        cfg.hue_vocal_react = n as f32;
+    }
+    if let Some(n) = patch.get("hue_saturation").and_then(|v| v.as_f64()) {
+        cfg.hue_saturation = n as f32;
+    }
+    if let Some(n) = patch.get("bg_dim").and_then(|v| v.as_f64()) {
+        cfg.bg_dim = n as f32;
+    }
+    *cfg = cfg.clone().clamped();
+}
+
+fn apply_icon_pack_patch(cfg: &mut IconPackConfig, patch: &serde_json::Value) {
+    if let Some(p) = patch.get("pack").and_then(|v| v.as_str()) {
+        cfg.pack = p.to_string();
+    }
+    if let Some(s) = patch.get("scale").and_then(|v| v.as_f64()) {
+        cfg.scale = (s as f32).clamp(0.7, 1.5);
+    }
+    if let Some(tm) = patch.get("tint_mode").and_then(|v| v.as_str()) {
+        cfg.tint_mode = tm.to_string();
+    }
+    if let Some(h) = patch.get("custom_hex") {
+        cfg.custom_hex = h
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+    }
+    if let Some(ov) = patch.get("overrides").and_then(|v| v.as_object()) {
+        let mut next = HashMap::new();
+        for (k, v) in ov {
+            if let Some(s) = v.as_str() {
+                let t = s.trim();
+                if !t.is_empty() {
+                    next.insert(k.to_string(), t.to_string());
+                }
+            }
+        }
+        cfg.overrides = next;
+    }
+    if let Some(fp) = patch.get("font_path") {
+        cfg.font_path = fp
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+    }
+    if let Some(ff) = patch.get("font_family") {
+        cfg.font_family = ff
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+    }
+}
+
+fn apply_button_pack_patch(cfg: &mut ButtonPackConfig, patch: &serde_json::Value) {
+    let opt_str = |key: &str| -> Option<Option<String>> {
+        patch.get(key).map(|v| {
+            v.as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string)
+        })
+    };
+    if let Some(b) = patch.get("enabled").and_then(|v| v.as_bool()) {
+        cfg.enabled = b;
+    }
+    if let Some(s) = patch.get("preset").and_then(|v| v.as_str()) {
+        cfg.preset = s.to_string();
+    }
+    if let Some(b) = patch.get("apply_pills").and_then(|v| v.as_bool()) {
+        cfg.apply_pills = b;
+    }
+    if let Some(b) = patch.get("apply_primary").and_then(|v| v.as_bool()) {
+        cfg.apply_primary = b;
+    }
+    if let Some(b) = patch.get("apply_glyphs").and_then(|v| v.as_bool()) {
+        cfg.apply_glyphs = b;
+    }
+    if let Some(b) = patch.get("apply_nav").and_then(|v| v.as_bool()) {
+        cfg.apply_nav = b;
+    }
+    if let Some(b) = patch.get("apply_rows").and_then(|v| v.as_bool()) {
+        cfg.apply_rows = b;
+    }
+    if let Some(b) = patch.get("apply_tiles").and_then(|v| v.as_bool()) {
+        cfg.apply_tiles = b;
+    }
+    if let Some(v) = patch.get("round_tl").and_then(|v| v.as_f64()) {
+        cfg.round_tl = v as f32;
+    }
+    if let Some(v) = patch.get("round_tr").and_then(|v| v.as_f64()) {
+        cfg.round_tr = v as f32;
+    }
+    if let Some(v) = patch.get("round_br").and_then(|v| v.as_f64()) {
+        cfg.round_br = v as f32;
+    }
+    if let Some(v) = patch.get("round_bl").and_then(|v| v.as_f64()) {
+        cfg.round_bl = v as f32;
+    }
+    if let Some(b) = patch.get("crop_tl").and_then(|v| v.as_bool()) {
+        cfg.crop_tl = b;
+    }
+    if let Some(b) = patch.get("crop_tr").and_then(|v| v.as_bool()) {
+        cfg.crop_tr = b;
+    }
+    if let Some(b) = patch.get("crop_br").and_then(|v| v.as_bool()) {
+        cfg.crop_br = b;
+    }
+    if let Some(b) = patch.get("crop_bl").and_then(|v| v.as_bool()) {
+        cfg.crop_bl = b;
+    }
+    if let Some(v) = patch.get("crop_size").and_then(|v| v.as_f64()) {
+        cfg.crop_size = v as f32;
+    }
+    if let Some(v) = patch.get("hue_shift_deg").and_then(|v| v.as_f64()) {
+        cfg.hue_shift_deg = v as f32;
+    }
+    if let Some(v) = patch.get("hue_strength").and_then(|v| v.as_f64()) {
+        cfg.hue_strength = v as f32;
+    }
+    if let Some(s) = opt_str("custom_tint_hex") {
+        cfg.custom_tint_hex = s;
+    }
+    if let Some(v) = patch.get("fill_opacity").and_then(|v| v.as_f64()) {
+        cfg.fill_opacity = v as f32;
+    }
+    if let Some(b) = patch.get("outline_enabled").and_then(|v| v.as_bool()) {
+        cfg.outline_enabled = b;
+    }
+    if let Some(v) = patch.get("outline_width").and_then(|v| v.as_f64()) {
+        cfg.outline_width = v as f32;
+    }
+    if let Some(s) = opt_str("outline_hex") {
+        cfg.outline_hex = s;
+    }
+    if let Some(v) = patch.get("outline_alpha").and_then(|v| v.as_f64()) {
+        cfg.outline_alpha = v as f32;
+    }
+    if let Some(v) = patch.get("inline_glow").and_then(|v| v.as_f64()) {
+        cfg.inline_glow = v as f32;
+    }
+    if let Some(v) = patch.get("outer_glow").and_then(|v| v.as_f64()) {
+        cfg.outer_glow = v as f32;
+    }
+    if let Some(v) = patch.get("bevel_emboss").and_then(|v| v.as_f64()) {
+        cfg.bevel_emboss = v as f32;
+    }
+    if let Some(b) = patch.get("gradient_enabled").and_then(|v| v.as_bool()) {
+        cfg.gradient_enabled = b;
+    }
+    if let Some(v) = patch.get("gradient_strength").and_then(|v| v.as_f64()) {
+        cfg.gradient_strength = v as f32;
+    }
+    if let Some(v) = patch.get("gradient_angle_deg").and_then(|v| v.as_f64()) {
+        cfg.gradient_angle_deg = v as f32;
+    }
+    if let Some(s) = opt_str("gradient_top_hex") {
+        cfg.gradient_top_hex = s;
+    }
+    if let Some(s) = opt_str("gradient_bottom_hex") {
+        cfg.gradient_bottom_hex = s;
+    }
+    if let Some(b) = patch.get("reactive_hover").and_then(|v| v.as_bool()) {
+        cfg.reactive_hover = b;
+    }
+    if let Some(v) = patch.get("hover_hue_shift_deg").and_then(|v| v.as_f64()) {
+        cfg.hover_hue_shift_deg = v as f32;
+    }
+    if let Some(v) = patch.get("hover_glow_boost").and_then(|v| v.as_f64()) {
+        cfg.hover_glow_boost = v as f32;
+    }
+    if let Some(v) = patch.get("hover_outline_boost").and_then(|v| v.as_f64()) {
+        cfg.hover_outline_boost = v as f32;
+    }
+    if let Some(v) = patch.get("hover_brightness").and_then(|v| v.as_f64()) {
+        cfg.hover_brightness = v as f32;
+    }
+    *cfg = cfg.clone().clamped();
+}
+
+fn apply_logo_patch(cfg: &mut LogoConfig, patch: &serde_json::Value) {
+    if let Some(b) = patch.get("enabled").and_then(|v| v.as_bool()) {
+        cfg.enabled = b;
+    }
+    if let Some(m) = patch.get("mode").and_then(|v| v.as_str()) {
+        cfg.mode = match m {
+            "themed" | "monochrome" | "custom_color" | "custom_image" => m.to_string(),
+            _ => "themed".to_string(),
+        };
+    }
+    if let Some(v) = patch.get("custom_hex") {
+        cfg.custom_hex = v
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+    }
+    if let Some(v) = patch.get("custom_path") {
+        cfg.custom_path = v
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+    }
+    if let Some(f) = patch.get("frame_style").and_then(|v| v.as_str()) {
+        cfg.frame_style = match f {
+            "clean" | "badge" | "glow" => f.to_string(),
+            _ => "clean".to_string(),
+        };
+    }
+    if let Some(s) = patch.get("size_px").and_then(|v| v.as_f64()) {
+        cfg.size_px = (s as f32).clamp(14.0, 44.0);
+    }
+    if let Some(b) = patch.get("beat_pulse").and_then(|v| v.as_bool()) {
+        cfg.beat_pulse = b;
+    }
+}
+
+fn apply_transparency_patch(cfg: &mut TransparencyConfig, patch: &serde_json::Value) {
+    if let Some(b) = patch.get("enabled").and_then(|v| v.as_bool()) {
+        cfg.enabled = b;
+    }
+    if let Some(v) = patch.get("base_alpha").and_then(|v| v.as_f64()) {
+        cfg.base_alpha = v as f32;
+    }
+    if let Some(v) = patch.get("surface_alpha").and_then(|v| v.as_f64()) {
+        cfg.surface_alpha = v as f32;
+    }
+    if let Some(v) = patch.get("card_alpha").and_then(|v| v.as_f64()) {
+        cfg.card_alpha = v as f32;
+    }
+    if let Some(v) = patch.get("player_bar_alpha").and_then(|v| v.as_f64()) {
+        cfg.player_bar_alpha = v as f32;
+    }
+    if let Some(v) = patch.get("accent_alpha").and_then(|v| v.as_f64()) {
+        cfg.accent_alpha = v as f32;
+    }
+    if let Some(v) = patch.get("text_alpha").and_then(|v| v.as_f64()) {
+        cfg.text_alpha = v as f32;
+    }
+    if let Some(h) = patch.get("tint_hex") {
+        cfg.tint_hex = h
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+    }
+    if let Some(m) = patch.get("bg_mode").and_then(|v| v.as_str()) {
+        cfg.bg_mode = m.to_string();
+    }
+    if let Some(p) = patch.get("bg_image_path") {
+        cfg.bg_image_path = p
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+    }
+    if let Some(v) = patch.get("bg_image_alpha").and_then(|v| v.as_f64()) {
+        cfg.bg_image_alpha = v as f32;
+    }
+    if let Some(f) = patch.get("bg_fit").and_then(|v| v.as_str()) {
+        cfg.bg_fit = f.to_string();
+    }
+    if let Some(h) = patch.get("tint2_hex") {
+        cfg.tint2_hex = h
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+    }
+    if let Some(b) = patch.get("hide_ui").and_then(|v| v.as_bool()) {
+        cfg.hide_ui = b;
+    }
+    if let Some(b) = patch.get("keep_player").and_then(|v| v.as_bool()) {
+        cfg.keep_player = b;
+    }
+    if let Some(b) = patch.get("keep_effects").and_then(|v| v.as_bool()) {
+        cfg.keep_effects = b;
+    }
+    if let Some(b) = patch.get("keep_visualizer").and_then(|v| v.as_bool()) {
+        cfg.keep_visualizer = b;
+    }
+    if let Some(b) = patch.get("keep_lyrics").and_then(|v| v.as_bool()) {
+        cfg.keep_lyrics = b;
+    }
+    if let Some(b) = patch.get("keep_artwork").and_then(|v| v.as_bool()) {
+        cfg.keep_artwork = b;
+    }
+    if let Some(b) = patch.get("keep_topbar").and_then(|v| v.as_bool()) {
+        cfg.keep_topbar = b;
+    }
+    if let Some(b) = patch.get("keep_sidebar").and_then(|v| v.as_bool()) {
+        cfg.keep_sidebar = b;
+    }
+    if let Some(b) = patch.get("keep_queue").and_then(|v| v.as_bool()) {
+        cfg.keep_queue = b;
+    }
+    *cfg = cfg.clone().clamped();
+}
+
+fn apply_popup_patch(cfg: &mut PopupPlayerConfig, patch: &serde_json::Value) {
+    if let Some(b) = patch.get("enabled").and_then(|v| v.as_bool()) {
+        cfg.enabled = b;
+    }
+    if let Some(s) = patch.get("terminal").and_then(|v| v.as_str()) {
+        cfg.terminal = s.to_string();
+    }
+    if let Some(s) = patch.get("layout").and_then(|v| v.as_str()) {
+        cfg.layout = s.to_string();
+    }
+    if let Some(b) = patch.get("show_picture").and_then(|v| v.as_bool()) {
+        cfg.show_picture = b;
+    }
+    if let Some(b) = patch.get("show_lyrics").and_then(|v| v.as_bool()) {
+        cfg.show_lyrics = b;
+    }
+    if let Some(b) = patch.get("show_eq").and_then(|v| v.as_bool()) {
+        cfg.show_eq = b;
+    }
+    if let Some(s) = patch.get("reactive_mode").and_then(|v| v.as_str()) {
+        cfg.reactive_mode = s.to_string();
+    }
+    if let Some(h) = patch.get("custom_hex") {
+        cfg.custom_hex = h
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+    }
+    if let Some(b) = patch.get("transparent_bg").and_then(|v| v.as_bool()) {
+        cfg.transparent_bg = b;
+    }
+    if let Some(b) = patch.get("auto_open_on_track").and_then(|v| v.as_bool()) {
+        cfg.auto_open_on_track = b;
+    }
+    if let Some(c) = patch.get("cols").and_then(|v| v.as_u64()) {
+        cfg.cols = (c as u16).clamp(44, 220);
+    }
+    if let Some(r) = patch.get("rows").and_then(|v| v.as_u64()) {
+        cfg.rows = (r as u16).clamp(12, 70);
+    }
+    if let Some(w) = patch.get("wm_class").and_then(|v| v.as_str()) {
+        let trimmed = w.trim();
+        if !trimmed.is_empty() {
+            cfg.wm_class = trimmed.to_string();
+        }
+    }
+    if let Some(s) = patch.get("art_mode").and_then(|v| v.as_str()) {
+        cfg.art_mode = s.to_string();
+    }
+    if let Some(s) = patch.get("ascii_preset").and_then(|v| v.as_str()) {
+        cfg.ascii_preset = s.to_string();
+    }
+    if let Some(b) = patch.get("show_list").and_then(|v| v.as_bool()) {
+        cfg.show_list = b;
+    }
+    if let Some(s) = patch.get("list_source").and_then(|v| v.as_str()) {
+        cfg.list_source = s.to_string();
+    }
+    if let Some(n) = patch.get("list_max_items").and_then(|v| v.as_u64()) {
+        cfg.list_max_items = (n as usize).clamp(1, 24);
+    } else if let Some(n) = patch.get("list_max_items").and_then(|v| v.as_f64()) {
+        cfg.list_max_items = (n.round() as usize).clamp(1, 24);
+    }
+    if let Some(s) = patch.get("eq_bars_style").and_then(|v| v.as_str()) {
+        cfg.eq_bars_style = s.to_string();
+    }
+    if let Some(n) = patch.get("eq_rows").and_then(|v| v.as_u64()) {
+        cfg.eq_rows = (n as usize).clamp(1, 6);
+    } else if let Some(n) = patch.get("eq_rows").and_then(|v| v.as_f64()) {
+        cfg.eq_rows = (n.round() as usize).clamp(1, 6);
+    }
+    if let Some(s) = patch.get("progress_style").and_then(|v| v.as_str()) {
+        cfg.progress_style = s.to_string();
+    }
+    if let Some(s) = patch.get("border_style").and_then(|v| v.as_str()) {
+        cfg.border_style = s.to_string();
+    }
+    if let Some(b) = patch.get("show_album").and_then(|v| v.as_bool()) {
+        cfg.show_album = b;
+    }
+    if let Some(b) = patch.get("show_badges").and_then(|v| v.as_bool()) {
+        cfg.show_badges = b;
+    }
+    if let Some(b) = patch.get("show_footer_hints").and_then(|v| v.as_bool()) {
+        cfg.show_footer_hints = b;
+    }
+    if let Some(b) = patch.get("auto_resize_layout").and_then(|v| v.as_bool()) {
+        cfg.auto_resize_layout = b;
+    }
+}
+
+impl CoreState {
+    fn close_popup_terminal(&mut self) {
+        if let Some(mut child) = self.popup_child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    fn launch_popup_terminal(&mut self) -> Result<String, String> {
+        if !self.persisted.popup_player.enabled {
+            return Err("Popup Player is disabled — enable it first".into());
+        }
+        if let Some(child) = &mut self.popup_child {
+            if matches!(child.try_wait(), Ok(None)) {
+                return Ok("Popup player terminal is already running".into());
+            }
+            self.popup_child = None;
+        }
+        let cfg = &self.persisted.popup_player;
+        let _ = cfg.save_atomic(&default_popup_config_path());
+
+        let popup_bin = resolve_popup_ctl_binary();
+        let term = pick_terminal_binary(&cfg.terminal)
+            .ok_or_else(|| format!("No supported terminal found (tried {})", cfg.terminal))?;
+
+        let wm_class = cfg.wm_class.as_str();
+        let mut cmd = std::process::Command::new(&term);
+        let term_name = Path::new(&term)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&term)
+            .to_ascii_lowercase();
+
+        match term_name.as_str() {
+            "kitty" => {
+                let px_w = u32::from(cfg.cols) * 9;
+                let px_h = u32::from(cfg.rows) * 19;
+                cmd.args([
+                    "--class",
+                    wm_class,
+                    "--title",
+                    "tntron Popup Player",
+                    "-o",
+                    &format!("initial_window_width={px_w}"),
+                    "-o",
+                    &format!("initial_window_height={px_h}"),
+                    "-e",
+                    &popup_bin,
+                    "popup",
+                ]);
+            }
+            "alacritty" => {
+                cmd.args([
+                    "--class",
+                    wm_class,
+                    "--title",
+                    "tntron Popup Player",
+                    "-e",
+                    &popup_bin,
+                    "popup",
+                ]);
+            }
+            "wezterm" => {
+                cmd.args(["start", "--class", wm_class, "--", &popup_bin, "popup"]);
+            }
+            "foot" => {
+                cmd.args([
+                    &format!("--app-id={wm_class}"),
+                    "--title=tntron Popup Player",
+                    &format!("--window-size-chars={}x{}", cfg.cols, cfg.rows),
+                    &popup_bin,
+                    "popup",
+                ]);
+            }
+            "ghostty" => {
+                cmd.args([
+                    &format!("--class={wm_class}"),
+                    "--title=tntron Popup Player",
+                    "-e",
+                    &popup_bin,
+                    "popup",
+                ]);
+            }
+            "gnome-terminal" => {
+                cmd.args(["--title=tntron Popup Player", "--", &popup_bin, "popup"]);
+            }
+            "xfce4-terminal" => {
+                cmd.args([
+                    "--title=tntron Popup Player",
+                    &format!("--role={wm_class}"),
+                    &format!("--geometry={}x{}", cfg.cols, cfg.rows),
+                    "-x",
+                    &popup_bin,
+                    "popup",
+                ]);
+            }
+            "mate-terminal" => {
+                cmd.args([
+                    "--title=tntron Popup Player",
+                    &format!("--role={wm_class}"),
+                    &format!("--geometry={}x{}", cfg.cols, cfg.rows),
+                    "-x",
+                    &popup_bin,
+                    "popup",
+                ]);
+            }
+            "lxterminal" => {
+                cmd.args([
+                    "--title=tntron Popup Player",
+                    &format!("--geometry={}x{}", cfg.cols, cfg.rows),
+                    "-e",
+                    &format!("{popup_bin} popup"),
+                ]);
+            }
+            "qterminal" | "cosmic-term" => {
+                cmd.args(["-e", &popup_bin, "popup"]);
+            }
+            "kgx" => {
+                cmd.args(["--title=tntron Popup Player", "-e", &format!("{popup_bin} popup")]);
+            }
+            "terminator" => {
+                cmd.args([
+                    "-T",
+                    "tntron Popup Player",
+                    "-x",
+                    &popup_bin,
+                    "popup",
+                ]);
+            }
+            "konsole" => {
+                cmd.args(["-p", "tabtitle=tntron Popup Player", "-e", &popup_bin, "popup"]);
+            }
+            "tilix" => {
+                cmd.args(["-t", "tntron Popup Player", "-e", &format!("{popup_bin} popup")]);
+            }
+            "st" => {
+                cmd.args(["-c", wm_class, "-t", "tntron Popup Player", "-e", &popup_bin, "popup"]);
+            }
+            "urxvt" => {
+                cmd.args([
+                    "-name",
+                    wm_class,
+                    "-title",
+                    "tntron Popup Player",
+                    "-e",
+                    &popup_bin,
+                    "popup",
+                ]);
+            }
+            _ => {
+                // xterm and generic X/Wayland terminals
+                cmd.args([
+                    "-class",
+                    wm_class,
+                    "-title",
+                    "tntron Popup Player",
+                    "-geometry",
+                    &format!("{}x{}", cfg.cols, cfg.rows),
+                    "-e",
+                    &popup_bin,
+                    "popup",
+                ]);
+            }
+        }
+
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed spawning {term_name}: {e}"))?;
+        self.popup_child = Some(child);
+        Ok(format!("Launched popup player in {term_name}"))
+    }
+}
+
+fn resolve_popup_ctl_binary() -> String {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("tntron-ctl");
+            if sibling.is_file() {
+                return sibling.display().to_string();
+            }
+        }
+    }
+    "tntron-ctl".to_string()
+}
+
+fn which_in_path(bin: &str) -> Option<String> {
+    if bin.contains('/') && Path::new(bin).is_file() {
+        return Some(bin.to_string());
+    }
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let cand = dir.join(bin);
+        if cand.is_file() {
+            return Some(cand.display().to_string());
+        }
+    }
+    None
+}
+
+fn pick_terminal_binary(preferred: &str) -> Option<String> {
+    let pref = preferred.trim().to_ascii_lowercase();
+    if !pref.is_empty() && pref != "auto" {
+        return which_in_path(&pref);
+    }
+    if let Ok(term_env) = std::env::var("TERMINAL") {
+        if let Some(found) = which_in_path(term_env.trim()) {
+            return Some(found);
+        }
+    }
+    let env = crate::storage::LinuxDisplayEnv::detect();
+    let lower_de = env.desktop.to_ascii_lowercase();
+    let de_preferred: Option<&str> = if env.is_xfce {
+        Some("xfce4-terminal")
+    } else if lower_de.contains("kde") || lower_de.contains("plasma") {
+        Some("konsole")
+    } else if lower_de.contains("gnome") {
+        Some("kgx")
+    } else if lower_de.contains("mate") {
+        Some("mate-terminal")
+    } else if lower_de.contains("lxqt") {
+        Some("qterminal")
+    } else if lower_de.contains("cosmic") {
+        Some("cosmic-term")
+    } else {
+        None
+    };
+    if let Some(de_term) = de_preferred {
+        if let Some(found) = which_in_path(de_term) {
+            return Some(found);
+        }
+    }
+    for cand in [
+        "kitty",
+        "alacritty",
+        "wezterm",
+        "foot",
+        "ghostty",
+        "konsole",
+        "gnome-terminal",
+        "kgx",
+        "xfce4-terminal",
+        "mate-terminal",
+        "qterminal",
+        "lxterminal",
+        "cosmic-term",
+        "tilix",
+        "terminator",
+        "st",
+        "urxvt",
+        "xterm",
+    ] {
+        if let Some(found) = which_in_path(cand) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 fn spawn_folder_card_scan(
@@ -2554,7 +3802,8 @@ fn spawn_folder_card_scan(
 
 fn spawn_track_asset_load(path: PathBuf, tx: mpsc::Sender<(PathBuf, Option<Vec<u8>>)>) {
     tokio::task::spawn_blocking(move || {
-        let cover = Scanner::extract_cover_art_blocking(&path);
+        let cover = Scanner::extract_cover_art_blocking(&path)
+            .or_else(|| path.parent().and_then(Scanner::find_folder_image_blocking));
         let _ = tx.blocking_send((path, cover));
     });
 }
@@ -2575,6 +3824,11 @@ pub async fn run_core_runtime(
 ) {
     let mut state = CoreState::with_persistence(music_root, default_state_path());
     state.hw_tx = Some(spawn_hardware_worker());
+    let (discord_tx, discord_status) = spawn_discord_worker();
+    state.discord_tx = Some(discord_tx);
+    state.discord_status = Some(discord_status);
+    state.sync_discord_rpc();
+    let mut last_discord_connected = false;
     let initial_scan = state.load_current_dir();
 
     let (scan_tx, mut scan_rx) = mpsc::channel::<Vec<MetadataPatch>>(32);
@@ -2642,6 +3896,8 @@ pub async fn run_core_runtime(
                 let is_shutdown = matches!(cmd, CoreCommand::Shutdown);
                 let mut fx = state.handle_command(cmd);
                 let open_tab = fx.open_ext_tab.take();
+                let copy_clip = fx.clipboard_copy.take();
+                let paste_ext = fx.clipboard_paste_ext.take();
                 apply_effects(
                     &state,
                     fx,
@@ -2656,6 +3912,12 @@ pub async fn run_core_runtime(
                 publish_state(&state, &status_watch_tx, &broadcast_tx, &ui_tx).await;
                 if let Some((ext_id, tab_id)) = open_tab {
                     let _ = ui_tx.send(CoreUpdate::OpenExtTab { ext_id, tab_id }).await;
+                }
+                if let Some(txt) = copy_clip {
+                    let _ = ui_tx.send(CoreUpdate::CopyToClipboard(txt)).await;
+                }
+                if let Some(ext_id) = paste_ext {
+                    let _ = ui_tx.send(CoreUpdate::RequestClipboardPaste { ext_id }).await;
                 }
                 if is_shutdown {
                     break;
@@ -2705,7 +3967,19 @@ pub async fn run_core_runtime(
             }
             Some((path, maybe_bytes)) = asset_rx.recv() => {
                 if state.current_track.as_ref().is_some_and(|t| t.path == path) {
+                    if let Some(bytes) = &maybe_bytes {
+                        let cpath = default_cover_cache_path();
+                        if std::fs::write(&cpath, bytes).is_ok() {
+                            state.cover_cache_path = Some(cpath);
+                        }
+                    } else {
+                        state.cover_cache_path = None;
+                    }
                     state.cover_art = maybe_bytes.map(Arc::new);
+                    let st = TntronStatus::from_state(&state);
+                    write_status_file(&st);
+                    let _ = status_watch_tx.send(st.clone());
+                    let _ = broadcast_tx.send(st);
                     let _ = ui_tx.send(CoreUpdate::Snapshot(Box::new(state.snapshot()))).await;
                 }
             }
@@ -2739,6 +4013,14 @@ pub async fn run_core_runtime(
                 }
             }
             _ = sync_tick.tick() => {
+                let dc_now = state
+                    .discord_status
+                    .as_ref()
+                    .is_some_and(|h| h.is_connected());
+                if dc_now != last_discord_connected {
+                    last_discord_connected = dc_now;
+                    publish_state(&state, &status_watch_tx, &broadcast_tx, &ui_tx).await;
+                }
                 if state.play_state == PlayState::Playing {
                     let _ = mpv_cmd_tx.send(MpvCommand::GetTimePos).await;
                     let st = TntronStatus::from_state(&state);
@@ -2791,8 +4073,20 @@ fn spawn_ext_async_job(ext_id: String, job: AsyncExtJob, tx: mpsc::Sender<ExtAsy
                 title,
                 artist,
                 duration_sec,
+                provider,
             } => {
-                let local = load_companion_lrc(&path);
+                let prov = provider
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("auto");
+
+                let local = if prov.eq_ignore_ascii_case("auto") || prov.eq_ignore_ascii_case("local") {
+                    load_companion_lrc(&path)
+                } else {
+                    Vec::new()
+                };
+
                 if !local.is_empty() {
                     let lines: Vec<serde_json::Value> = local
                         .into_iter()
@@ -2809,10 +4103,24 @@ fn spawn_ext_async_job(ext_id: String, job: AsyncExtJob, tx: mpsc::Sender<ExtAsy
                         stream_play: None,
                         rescan_after: false,
                     }
+                } else if prov.eq_ignore_ascii_case("local") {
+                    ExtAsyncResult {
+                        ext_id,
+                        event_name: "lyricsLoaded".into(),
+                        payload: serde_json::json!({
+                            "path": path.display().to_string(),
+                            "source": "None",
+                            "lines": [],
+                            "error": "No companion .lrc file found",
+                        }),
+                        stream_play: None,
+                        rescan_after: false,
+                    }
                 } else {
-                    match network::fetch_lrclib_lyrics(&title, &artist, duration_sec).await {
-                        Ok((lines, _raw)) => {
-                            let arr: Vec<serde_json::Value> = lines
+                    match network::fetch_lyrics_with_provider(&title, &artist, duration_sec, prov).await {
+                        Ok(fetched) => {
+                            let arr: Vec<serde_json::Value> = fetched
+                                .lines
                                 .into_iter()
                                 .map(|l| serde_json::json!({ "time_sec": l.time_sec, "text": l.text }))
                                 .collect();
@@ -2821,7 +4129,7 @@ fn spawn_ext_async_job(ext_id: String, job: AsyncExtJob, tx: mpsc::Sender<ExtAsy
                                 event_name: "lyricsLoaded".into(),
                                 payload: serde_json::json!({
                                     "path": path.display().to_string(),
-                                    "source": "LRCLIB",
+                                    "source": fetched.source,
                                     "lines": arr,
                                 }),
                                 stream_play: None,
@@ -2842,6 +4150,37 @@ fn spawn_ext_async_job(ext_id: String, job: AsyncExtJob, tx: mpsc::Sender<ExtAsy
                         },
                     }
                 }
+            }
+            AsyncExtJob::LyricsTranslate {
+                path,
+                target_lang,
+                lines,
+            } => match network::translate_lyrics_lines(&lines, &target_lang).await {
+                Ok(res) => ExtAsyncResult {
+                    ext_id,
+                    event_name: "lyricsTranslated".into(),
+                    payload: serde_json::json!({
+                        "path": path,
+                        "target_lang": res.target_lang,
+                        "detected_lang": res.detected_lang,
+                        "provider": res.provider,
+                        "translations": res.lines,
+                    }),
+                    stream_play: None,
+                    rescan_after: false,
+                },
+                Err(err) => ExtAsyncResult {
+                    ext_id,
+                    event_name: "lyricsTranslated".into(),
+                    payload: serde_json::json!({
+                        "path": path,
+                        "target_lang": target_lang,
+                        "translations": [],
+                        "error": err,
+                    }),
+                    stream_play: None,
+                    rescan_after: false,
+                },
             }
             AsyncExtJob::FetchRss { url } => match network::fetch_rss_feed(&url).await {
                 Ok(feed) => ExtAsyncResult {
@@ -2932,6 +4271,7 @@ async fn publish_state(
     broadcast_tx: &broadcast::Sender<TntronStatus>,
     ui_tx: &mpsc::Sender<CoreUpdate>,
 ) {
+    state.sync_discord_rpc();
     let st = TntronStatus::from_state(state);
     write_status_file(&st);
     let _ = status_watch_tx.send(st.clone());
@@ -3012,5 +4352,207 @@ mod tests {
             cmds.as_slice(),
             [MpvCommand::Seek { seconds, relative: false }] if (*seconds - 10.0).abs() < 0.01
         ));
+    }
+
+    fn eof_event(reason: Option<&str>) -> MpvActorEvent {
+        MpvActorEvent::Event(MpvEvent::EndFile {
+            reason: reason.map(str::to_string),
+            file_error: None,
+            playlist_entry_id: None,
+        })
+    }
+
+    #[test]
+    fn test_consecutive_eof_events_advance_all_tracks() {
+        let mut s = mk_test_state();
+        s.loop_mode = LoopMode::All;
+        let first = Arc::clone(&s.active_playlist[0]);
+        s.start_track(first, Some(0));
+        assert_eq!(s.active_playlist_index, Some(0));
+
+        // A "stop" end-file (e.g. from loadfile replace) must not advance or swallow future EOFs.
+        let stop_fx = s.handle_mpv_event(eof_event(Some("stop")));
+        assert!(stop_fx.mpv_cmds.is_empty());
+        assert_eq!(s.active_playlist_index, Some(0));
+
+        for expected_idx in [1, 2, 3, 0, 1] {
+            let fx = s.handle_mpv_event(eof_event(Some("eof")));
+            assert_eq!(s.active_playlist_index, Some(expected_idx));
+            assert!(fx.mpv_cmds.iter().any(|c| matches!(
+                c,
+                MpvCommand::LoadFile { path, replace: true }
+                    if path == &format!("/tmp/song_{expected_idx}.m4a")
+            )));
+        }
+
+        // Stopping playback stops further EOF processing cleanly.
+        s.handle_command(CoreCommand::Stop);
+        assert_eq!(s.play_state, PlayState::Stopped);
+        let after_stop = s.handle_mpv_event(eof_event(Some("eof")));
+        assert!(after_stop.mpv_cmds.is_empty());
+    }
+
+    #[test]
+    fn test_eof_emits_unpause_and_load_file() {
+        let mut s = mk_test_state();
+        let first = Arc::clone(&s.active_playlist[0]);
+        s.start_track(first, Some(0));
+        s.play_state = PlayState::Paused;
+
+        let fx = s.handle_mpv_event(eof_event(Some("eof")));
+        assert_eq!(s.play_state, PlayState::Playing);
+        assert_eq!(s.active_playlist_index, Some(1));
+        assert!(matches!(
+            fx.mpv_cmds.as_slice(),
+            [
+                MpvCommand::LoadFile { path, replace: true },
+                MpvCommand::SetPause(false)
+            ] if path == "/tmp/song_1.m4a"
+        ));
+    }
+
+    #[test]
+    fn test_ext_play_path_populates_playlist_and_advances_on_eof() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("tntron_ext_play_test_{unique}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let song_a = dir.join("01_alpha.mp3");
+        let song_b = dir.join("02_beta.mp3");
+        std::fs::write(&song_a, b"dummy a").unwrap();
+        std::fs::write(&song_b, b"dummy b").unwrap();
+
+        let mut s = CoreState::new(dir.clone());
+        s.active_playlist.clear();
+        s.active_playlist_index = None;
+
+        let mut fx = CommandEffects::default();
+        s.apply_ext_commands(
+            vec![(
+                "better-home".to_string(),
+                ExtHostCommand::PlaybackPlayPath {
+                    path: song_a.to_string_lossy().into_owned(),
+                },
+            )],
+            &mut fx,
+        );
+
+        assert_eq!(s.active_playlist.len(), 2);
+        assert_eq!(s.active_playlist_index, Some(0));
+        assert_eq!(
+            s.current_track.as_ref().map(|t| &t.path),
+            Some(&song_a)
+        );
+
+        let eof_fx = s.handle_mpv_event(eof_event(Some("eof")));
+        assert_eq!(s.active_playlist_index, Some(1));
+        assert_eq!(
+            s.current_track.as_ref().map(|t| &t.path),
+            Some(&song_b)
+        );
+        assert!(eof_fx.mpv_cmds.iter().any(|c| matches!(
+            c,
+            MpvCommand::LoadFile { path, replace: true } if path == &song_b.to_string_lossy()
+        )));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_zero_extensions_core_playback_and_resets_ext_flags() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tntron_zero_ext_{unique}"));
+        let music = root.join("music");
+        let ext_dir = root.join("empty_extensions");
+        let state_path = root.join("state.json");
+        std::fs::create_dir_all(&music).unwrap();
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        std::fs::write(music.join("01_one.mp3"), b"dummy 1").unwrap();
+        std::fs::write(music.join("02_two.mp3"), b"dummy 2").unwrap();
+
+        // Simulate stale extension flags persisted from a deleted/disabled extension setup.
+        let mut stale = PersistentState::default();
+        stale.transparency.enabled = true;
+        stale.transparency.hide_ui = true;
+        stale.reactive_ui.enabled = true;
+        stale.save_atomic(&state_path).unwrap();
+
+        let mut s = CoreState::with_paths(music.clone(), Some(state_path), Some(ext_dir));
+        assert!(s.ext_host.cards().is_empty());
+        assert!(!s.persisted.transparency.enabled);
+        assert!(!s.persisted.transparency.hide_ui);
+        assert!(!s.persisted.reactive_ui.enabled);
+
+        s.load_current_dir();
+        let fx = s.handle_command(CoreCommand::TogglePause);
+        assert_eq!(s.play_state, PlayState::Playing);
+        assert_eq!(s.active_playlist.len(), 2);
+        assert!(fx.mpv_cmds.iter().any(|c| matches!(c, MpvCommand::LoadFile { .. })));
+
+        let next_fx = s.handle_mpv_event(eof_event(Some("eof")));
+        assert_eq!(s.active_playlist_index, Some(1));
+        assert!(next_fx
+            .mpv_cmds
+            .iter()
+            .any(|c| matches!(c, MpvCommand::SetPause(false))));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_tnt_import_does_not_overwrite_profile_stats_until_approved() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tntron_profile_import_{unique}"));
+        let music = root.join("music");
+        let ext_dir = root.join("exts");
+        std::fs::create_dir_all(&music).unwrap();
+        std::fs::create_dir_all(&ext_dir).unwrap();
+
+        let tnt_file = root.join("backup_with_stats.tnt");
+        let mut src = CoreState::with_paths(music.clone(), None, Some(ext_dir.clone()));
+        src.persisted.profile.name = "RemoteUser".into();
+        src.persisted.profile.stats_total_sec = 4200;
+        src.persisted.profile.stats_total_plays = 33;
+        src.persisted.profile.avatar_path = Some("~/Pictures/avatar.jxl".into());
+        src.exec_export_full_tnt(&tnt_file.to_string_lossy());
+        assert!(tnt_file.is_file());
+
+        let mut local = CoreState::with_paths(music, None, Some(ext_dir));
+        local.persisted.profile.name = "LocalMe".into();
+        local.persisted.profile.stats_total_sec = 90;
+        local.persisted.profile.stats_total_plays = 2;
+
+        local.handle_command(CoreCommand::ImportFullTnt(
+            tnt_file.to_string_lossy().into_owned(),
+        ));
+        // Default import must NOT overwrite stats without approval
+        assert_eq!(local.persisted.profile.name, "LocalMe");
+        assert_eq!(local.persisted.profile.stats_total_sec, 90);
+        assert!(local.pending_profile_import.is_some());
+
+        // Disapproving discards pending stats
+        local.handle_command(CoreCommand::ResolvePendingProfileImport(false));
+        assert_eq!(local.persisted.profile.name, "LocalMe");
+        assert!(local.pending_profile_import.is_none());
+
+        // Re-importing & approving applies imported profile stats once
+        local.handle_command(CoreCommand::ImportFullTnt(
+            tnt_file.to_string_lossy().into_owned(),
+        ));
+        local.handle_command(CoreCommand::ResolvePendingProfileImport(true));
+        assert_eq!(local.persisted.profile.name, "RemoteUser");
+        assert_eq!(local.persisted.profile.stats_total_sec, 4200);
+        assert_eq!(local.persisted.profile.stats_total_plays, 33);
+        assert!(local.pending_profile_import.is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

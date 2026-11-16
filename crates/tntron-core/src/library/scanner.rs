@@ -99,10 +99,67 @@ impl Scanner {
         Some(pic.data().to_vec())
     }
 
-    /// Counts audio tracks inside `folder` and returns cover art from the first track that has one.
+    /// Finds an image file inside `folder` (prioritizing cover/folder/thumb names), returning its bytes.
+    pub fn find_folder_image_blocking(folder: &Path) -> Option<Vec<u8>> {
+        const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif"];
+        const PREFERRED_STEMS: &[&str] = &[
+            "cover", "folder", "front", "album", "art", "artwork", "thumb", "thumbnail", "poster",
+        ];
+        const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
+
+        let rd = std::fs::read_dir(folder).ok()?;
+        let mut candidates: Vec<(u8, String, std::path::PathBuf)> = Vec::new();
+        for entry in rd.filter_map(|e| e.ok()) {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if !ft.is_file() {
+                continue;
+            }
+            let p = entry.path();
+            let Some(ext) = p.extension().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !IMAGE_EXTS.iter().any(|e| ext.eq_ignore_ascii_case(e)) {
+                continue;
+            }
+            if entry.metadata().is_ok_and(|m| m.len() > MAX_IMAGE_BYTES) {
+                continue;
+            }
+            let stem_lower = p
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let name_lower = p
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let rank = if PREFERRED_STEMS.iter().any(|s| *s == stem_lower) {
+                0
+            } else {
+                1
+            };
+            candidates.push((rank, name_lower, p));
+        }
+
+        candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        for (_, _, img_path) in candidates {
+            if let Ok(bytes) = std::fs::read(&img_path) {
+                if !bytes.is_empty() {
+                    return Some(bytes);
+                }
+            }
+        }
+        None
+    }
+
+    /// Counts audio tracks inside `folder` and returns a folder image if present,
+    /// falling back to embedded cover art from the first track that has one.
     pub fn scan_folder_summary_blocking(folder: &Path) -> (usize, Option<Vec<u8>>) {
         let mut count = 0usize;
-        let mut cover = None;
+        let mut cover = Self::find_folder_image_blocking(folder);
         if let Ok(rd) = std::fs::read_dir(folder) {
             for entry in rd.filter_map(|e| e.ok()) {
                 let Ok(ft) = entry.file_type() else {
@@ -117,5 +174,34 @@ impl Scanner {
             }
         }
         (count, cover)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_folder_image_prefers_cover_and_picks_any_image() {
+        let dir = std::env::temp_dir().join(format!(
+            "tntron_folder_img_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(dir.join("zebra.png"), b"PNGDATA").unwrap();
+        assert_eq!(
+            Scanner::find_folder_image_blocking(&dir).as_deref(),
+            Some(b"PNGDATA".as_slice())
+        );
+
+        std::fs::write(dir.join("cover.jpg"), b"COVERJPG").unwrap();
+        assert_eq!(
+            Scanner::find_folder_image_blocking(&dir).as_deref(),
+            Some(b"COVERJPG".as_slice())
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

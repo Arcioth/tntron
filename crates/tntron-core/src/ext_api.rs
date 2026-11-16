@@ -197,6 +197,8 @@ pub struct ExtRegisteredTheme {
     pub text: String,
     pub text_sub: String,
     pub accent: String,
+    #[serde(default)]
+    pub logo_color: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,6 +266,8 @@ pub enum ExtHostCommand {
         text: String,
         text_sub: String,
         accent: String,
+        #[serde(default)]
+        logo_color: Option<String>,
     },
     SetAudioFilter {
         filter: String,
@@ -335,6 +339,13 @@ pub enum ExtHostCommand {
         title: String,
         artist: String,
         duration_sec: f64,
+        #[serde(default)]
+        provider: Option<String>,
+    },
+    LyricsTranslate {
+        path: String,
+        target_lang: String,
+        lines: Vec<String>,
     },
     NetFetchRss {
         url: String,
@@ -379,6 +390,30 @@ pub enum ExtHostCommand {
     UiSetLayoutConfig {
         patch: serde_json::Value,
     },
+    UiSetReactiveConfig {
+        patch: serde_json::Value,
+    },
+    UiSetIconConfig {
+        patch: serde_json::Value,
+    },
+    UiSetButtonConfig {
+        patch: serde_json::Value,
+    },
+    UiSetLogoConfig {
+        patch: serde_json::Value,
+    },
+    UiSetTransparencyConfig {
+        patch: serde_json::Value,
+    },
+    UiSetPopupConfig {
+        patch: serde_json::Value,
+    },
+    UiCopyClipboard {
+        text: String,
+    },
+    UiRequestClipboardPaste,
+    PopupLaunch,
+    PopupClose,
     UiOpenSidebar {
         tab_id: String,
     },

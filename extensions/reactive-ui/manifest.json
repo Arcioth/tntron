@@ -1,0 +1,11 @@
+{
+  "id": "tntron.reactive-ui",
+  "name": "Reactive UI",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Audio-reactive UI background with bass edge glow, side EQ styles, configurable blur, drum-zooming particles, vocal-reactive hue loop, and .tnt preset export/import.",
+  "author": "tntron",
+  "main": "main.lua",
+  "permissions": ["playback:read", "ui:sidebar", "storage", "fs:write", "notify"],
+  "requires": []
+}

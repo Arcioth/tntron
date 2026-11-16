@@ -1,0 +1,62 @@
+name: Nightly Build & Release
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-nightly:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system build and media dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev libvulkan-dev \
+            libfontconfig1-dev libfreetype-dev libmpv-dev mpv imagemagick \
+            libjxl-tools curl
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo crates & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Fetch existing nightly GIFs pack if available
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p assets/gifs
+          if gh release download nightly -p "tntron-gifs-pack.tar.gz" -D /tmp/gifs-dl 2>/dev/null; then
+            tar -xzf /tmp/gifs-dl/tntron-gifs-pack.tar.gz -C assets/
+          fi
+
+      - name: Build nightly bundle with GIFs
+        run: |
+          chmod +x scripts/build-nightly.sh
+          TNTRON_GIFS_DIR="$PWD/assets/gifs" NIGHTLY_TAG="nightly" bash scripts/build-nightly.sh
+
+      - name: Publish Nightly Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: Nightly Build (with GIFs & Extensions)
+          prerelease: true
+          files: |
+            dist/tntron-nightly-linux-*.tar.gz
+            dist/tntron-nightly-linux-*.sha256
+            dist/tntron-gifs-pack.tar.gz

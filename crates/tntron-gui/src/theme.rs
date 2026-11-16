@@ -6,7 +6,6 @@ use tntron_core::ExtRegisteredTheme;
 pub struct ThemeSpec {
     pub slug: String,
     pub label: String,
-    pub is_light: bool,
     pub base: Color,
     pub sidebar: Color,
     pub surface: Color,
@@ -18,6 +17,7 @@ pub struct ThemeSpec {
     pub accent: Color,
     pub accent_fg: Color,
     pub danger: Color,
+    pub logo_color: Color,
 }
 
 impl ThemeSpec {
@@ -43,7 +43,6 @@ impl ThemeSpec {
         Self {
             slug: ext.slug.clone(),
             label: ext.label.clone(),
-            is_light,
             base,
             sidebar: parse_hex_color(&ext.sidebar).unwrap_or(rgb(0x12, 0x12, 0x12)),
             surface: parse_hex_color(&ext.main).unwrap_or(rgb(0x12, 0x12, 0x12)),
@@ -63,6 +62,11 @@ impl ThemeSpec {
                 Color::WHITE
             },
             danger: rgb(0xef, 0x44, 0x44),
+            logo_color: ext
+                .logo_color
+                .as_deref()
+                .and_then(parse_hex_color)
+                .unwrap_or(accent),
         }
     }
 }
@@ -80,6 +84,7 @@ struct BuiltinDef {
     muted: Color,
     accent: Color,
     accent_fg: Color,
+    logo_color: Color,
 }
 
 impl BuiltinDef {
@@ -87,7 +92,6 @@ impl BuiltinDef {
         ThemeSpec {
             slug: self.slug.to_string(),
             label: self.label.to_string(),
-            is_light: self.is_light,
             base: self.base,
             sidebar: self.sidebar,
             surface: self.surface,
@@ -103,6 +107,7 @@ impl BuiltinDef {
             accent: self.accent,
             accent_fg: self.accent_fg,
             danger: rgb(0xef, 0x44, 0x44),
+            logo_color: self.logo_color,
         }
     }
 }
@@ -144,6 +149,7 @@ const BUILTIN_THEMES: &[BuiltinDef] = &[
         muted: rgb(0xb3, 0xb3, 0xb3),
         accent: rgb(0x1d, 0xb9, 0x54),
         accent_fg: rgb(0x00, 0x00, 0x00),
+        logo_color: rgb(0x1d, 0xb9, 0x54),
     },
     BuiltinDef {
         slug: "dark",
@@ -158,6 +164,7 @@ const BUILTIN_THEMES: &[BuiltinDef] = &[
         muted: rgb(0x88, 0x88, 0x88),
         accent: rgb(0xff, 0xff, 0xff),
         accent_fg: rgb(0x00, 0x00, 0x00),
+        logo_color: rgb(0xff, 0xff, 0xff),
     },
     BuiltinDef {
         slug: "light",
@@ -172,6 +179,7 @@ const BUILTIN_THEMES: &[BuiltinDef] = &[
         muted: rgb(0x52, 0x52, 0x5b),
         accent: rgb(0x18, 0x18, 0x1b),
         accent_fg: rgb(0xff, 0xff, 0xff),
+        logo_color: rgb(0x18, 0x18, 0x1b),
     },
     BuiltinDef {
         slug: "blue",
@@ -186,6 +194,7 @@ const BUILTIN_THEMES: &[BuiltinDef] = &[
         muted: rgb(0x94, 0xa3, 0xb8),
         accent: rgb(0x3b, 0x82, 0xf6),
         accent_fg: rgb(0xff, 0xff, 0xff),
+        logo_color: rgb(0x60, 0xa5, 0xfa),
     },
     BuiltinDef {
         slug: "purple",
@@ -200,6 +209,7 @@ const BUILTIN_THEMES: &[BuiltinDef] = &[
         muted: rgb(0xa7, 0x8b, 0xfa),
         accent: rgb(0xa8, 0x55, 0xf7),
         accent_fg: rgb(0xff, 0xff, 0xff),
+        logo_color: rgb(0xc0, 0x84, 0xfc),
     },
     BuiltinDef {
         slug: "red",
@@ -214,6 +224,7 @@ const BUILTIN_THEMES: &[BuiltinDef] = &[
         muted: rgb(0xf8, 0x71, 0x71),
         accent: rgb(0xef, 0x44, 0x44),
         accent_fg: rgb(0xff, 0xff, 0xff),
+        logo_color: rgb(0xf8, 0x71, 0x71),
     },
     BuiltinDef {
         slug: "gold",
@@ -228,6 +239,7 @@ const BUILTIN_THEMES: &[BuiltinDef] = &[
         muted: rgb(0xfa, 0xcc, 0x15),
         accent: rgb(0xea, 0xb3, 0x08),
         accent_fg: rgb(0x00, 0x00, 0x00),
+        logo_color: rgb(0xfb, 0xbf, 0x24),
     },
     BuiltinDef {
         slug: "cyberpunk",
@@ -242,6 +254,7 @@ const BUILTIN_THEMES: &[BuiltinDef] = &[
         muted: rgb(0xc0, 0x26, 0xd3),
         accent: rgb(0xff, 0x00, 0x7f),
         accent_fg: rgb(0xff, 0xff, 0xff),
+        logo_color: rgb(0x00, 0xf0, 0xff),
     },
     BuiltinDef {
         slug: "terminal",
@@ -256,6 +269,7 @@ const BUILTIN_THEMES: &[BuiltinDef] = &[
         muted: rgb(0x00, 0xaa, 0x00),
         accent: rgb(0x00, 0xff, 0x00),
         accent_fg: rgb(0x00, 0x00, 0x00),
+        logo_color: rgb(0x00, 0xff, 0x00),
     },
     BuiltinDef {
         slug: "pharoh",
@@ -270,6 +284,7 @@ const BUILTIN_THEMES: &[BuiltinDef] = &[
         muted: rgb(0xc2, 0xa6, 0x61),
         accent: rgb(0xd4, 0xaf, 0x37),
         accent_fg: rgb(0x00, 0x00, 0x00),
+        logo_color: rgb(0xd4, 0xaf, 0x37),
     },
     BuiltinDef {
         slug: "turk",
@@ -284,6 +299,7 @@ const BUILTIN_THEMES: &[BuiltinDef] = &[
         muted: rgb(0xfc, 0xa5, 0xa5),
         accent: rgb(0xe3, 0x0a, 0x17),
         accent_fg: rgb(0xff, 0xff, 0xff),
+        logo_color: rgb(0xe3, 0x0a, 0x17),
     },
     BuiltinDef {
         slug: "clouds",
@@ -298,6 +314,7 @@ const BUILTIN_THEMES: &[BuiltinDef] = &[
         muted: rgb(0x5a, 0x7c, 0x9e),
         accent: rgb(0x38, 0xbd, 0xf8),
         accent_fg: rgb(0x00, 0x00, 0x00),
+        logo_color: rgb(0x02, 0x84, 0xc7),
     },
 ];
 
