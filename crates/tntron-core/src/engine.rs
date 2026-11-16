@@ -423,6 +423,9 @@ impl CoreState {
             dirty_persist: false,
         };
         state.migrate_legacy_listening_stats();
+        // Always boot into full visible UI even if an earlier session exited in Hide UI mode.
+        state.persisted.layout.hide_ui = false;
+        state.persisted.transparency.hide_ui = false;
 
         state.refresh_root_folders();
         state.refresh_all_tracks();
@@ -1380,6 +1383,13 @@ impl CoreState {
         if !has("tntron.popup-player") {
             self.persisted.popup_player.enabled = false;
             self.close_popup_terminal();
+        }
+        if !has("openify.visualizer")
+            && !has("openify.better-visualizer")
+            && !has("openify.better-layouts")
+        {
+            self.persisted.layout.show_player_viz = false;
+            self.persisted.layout.player_viz_mode = "bars".to_string();
         }
     }
 
@@ -4501,6 +4511,8 @@ mod tests {
         let mut stale = PersistentState::default();
         stale.transparency.enabled = true;
         stale.transparency.hide_ui = true;
+        stale.layout.hide_ui = true;
+        stale.layout.show_player_viz = true;
         stale.reactive_ui.enabled = true;
         stale.save_atomic(&state_path).unwrap();
 
@@ -4508,6 +4520,8 @@ mod tests {
         assert!(s.ext_host.cards().is_empty());
         assert!(!s.persisted.transparency.enabled);
         assert!(!s.persisted.transparency.hide_ui);
+        assert!(!s.persisted.layout.hide_ui);
+        assert!(!s.persisted.layout.show_player_viz);
         assert!(!s.persisted.reactive_ui.enabled);
 
         s.load_current_dir();

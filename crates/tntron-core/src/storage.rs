@@ -201,7 +201,7 @@ impl Default for LayoutConfig {
             show_col_album: true,
             show_col_duration: true,
             show_telemetry_strip: false,
-            show_player_viz: true,
+            show_player_viz: false,
             player_viz_mode: "bars".to_string(),
             toast_zone: "top-right".to_string(),
             show_topbar_hide_ui: true,

@@ -5405,17 +5405,23 @@ fn wrap_dismiss_popover<'a>(
 }
 
 fn decode_any_image_handle(raw: &str) -> Option<image::Handle> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    let mut cleaned = raw.trim();
+    cleaned = cleaned.trim_matches(|c| c == '"' || c == '\'').trim();
+    if cleaned.is_empty() {
         return None;
     }
-    let resolved = if let Some(rest) = trimmed.strip_prefix("~/") {
+    let file_uri_decoded;
+    if let Some(rest) = cleaned.strip_prefix("file://") {
+        file_uri_decoded = percent_decode_path(rest);
+        cleaned = file_uri_decoded.trim();
+    }
+    let resolved = if let Some(rest) = cleaned.strip_prefix("~/") {
         let home = std::env::var_os("HOME")?;
         PathBuf::from(home).join(rest)
-    } else if trimmed == "~" {
+    } else if cleaned == "~" {
         PathBuf::from(std::env::var_os("HOME")?)
     } else {
-        PathBuf::from(trimmed)
+        PathBuf::from(cleaned)
     };
     if !resolved.is_file() {
         return None;
@@ -5426,22 +5432,41 @@ fn decode_any_image_handle(raw: &str) -> Option<image::Handle> {
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
 
-    if ext == "jxl" {
-        let tmp = std::env::temp_dir().join(format!("tntron_jxl_{}.png", std::process::id()));
-        if let Ok(status) = std::process::Command::new("djxl")
-            .arg(&resolved)
-            .arg(&tmp)
-            .status()
-        {
-            if status.success() {
-                let bytes = std::fs::read(&tmp).ok();
-                let _ = std::fs::remove_file(&tmp);
-                if let Some(b) = bytes {
-                    return Some(image::Handle::from_bytes(b));
+    let raw_bytes = std::fs::read(&resolved).ok()?;
+    let is_jxl_magic = raw_bytes.starts_with(&[0xFF, 0x0A])
+        || raw_bytes.starts_with(b"\x00\x00\x00\x0CJXL ");
+
+    if ext == "jxl" || is_jxl_magic {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp = std::env::temp_dir().join(format!(
+            "tntron_jxl_{}_{unique}.png",
+            std::process::id()
+        ));
+        let mut djxl_bins = vec![PathBuf::from("djxl")];
+        if let Some(home) = std::env::var_os("HOME") {
+            djxl_bins.push(PathBuf::from(home).join(".local/bin/djxl"));
+        }
+        for bin in djxl_bins {
+            if let Ok(out) = std::process::Command::new(bin)
+                .arg(&resolved)
+                .arg(&tmp)
+                .output()
+            {
+                if out.status.success() {
+                    let bytes = std::fs::read(&tmp).ok();
+                    let _ = std::fs::remove_file(&tmp);
+                    if let Some(b) = bytes {
+                        if !b.is_empty() {
+                            return Some(image::Handle::from_bytes(b));
+                        }
+                    }
                 }
             }
+            let _ = std::fs::remove_file(&tmp);
         }
-        let _ = std::fs::remove_file(&tmp);
         if let Ok(out) = std::process::Command::new("magick")
             .arg(&resolved)
             .arg("png:-")
@@ -5477,8 +5502,27 @@ fn decode_any_image_handle(raw: &str) -> Option<image::Handle> {
         return None;
     }
 
-    let bytes = std::fs::read(&resolved).ok()?;
-    Some(image::Handle::from_bytes(bytes))
+    Some(image::Handle::from_bytes(raw_bytes))
+}
+
+fn percent_decode_path(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(val) = u8::from_str_radix(hex, 16) {
+                    out.push(val);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn fmt_duration_words(sec: u64) -> String {

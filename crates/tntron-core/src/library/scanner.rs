@@ -91,17 +91,76 @@ impl Scanner {
         })
     }
 
+    /// Converts raw JPEG XL bytes (if JXL magic header is detected) into PNG bytes using `djxl` or `magick`.
+    pub fn normalize_image_bytes_blocking(bytes: Vec<u8>) -> Option<Vec<u8>> {
+        let is_jxl = bytes.starts_with(&[0xFF, 0x0A])
+            || bytes.starts_with(b"\x00\x00\x00\x0CJXL ");
+        if !is_jxl {
+            return Some(bytes);
+        }
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp_in = std::env::temp_dir().join(format!(
+            "tntron_jxl_in_{}_{unique}.jxl",
+            std::process::id()
+        ));
+        let tmp_out = std::env::temp_dir().join(format!(
+            "tntron_jxl_out_{}_{unique}.png",
+            std::process::id()
+        ));
+        if std::fs::write(&tmp_in, &bytes).is_ok() {
+            let mut djxl_bins = vec![std::path::PathBuf::from("djxl")];
+            if let Ok(home) = std::env::var("HOME") {
+                djxl_bins.push(std::path::PathBuf::from(home).join(".local/bin/djxl"));
+            }
+            for bin in djxl_bins {
+                if let Ok(st) = std::process::Command::new(bin)
+                    .arg(&tmp_in)
+                    .arg(&tmp_out)
+                    .output()
+                {
+                    if st.status.success() {
+                        if let Ok(png) = std::fs::read(&tmp_out) {
+                            let _ = std::fs::remove_file(&tmp_in);
+                            let _ = std::fs::remove_file(&tmp_out);
+                            if !png.is_empty() {
+                                return Some(png);
+                            }
+                        }
+                    }
+                }
+            }
+            if let Ok(out) = std::process::Command::new("magick")
+                .arg(&tmp_in)
+                .arg("png:-")
+                .output()
+            {
+                let _ = std::fs::remove_file(&tmp_in);
+                let _ = std::fs::remove_file(&tmp_out);
+                if out.status.success() && !out.stdout.is_empty() {
+                    return Some(out.stdout);
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&tmp_in);
+        let _ = std::fs::remove_file(&tmp_out);
+        None
+    }
+
     /// Extracts embedded front-cover (or first available) image bytes for the GUI player bar.
     pub fn extract_cover_art_blocking(path: &Path) -> Option<Vec<u8>> {
         let tagged_file = Probe::open(path).ok()?.read().ok()?;
         let tag = tagged_file.primary_tag().or_else(|| tagged_file.first_tag())?;
         let pic = tag.pictures().first()?;
-        Some(pic.data().to_vec())
+        Self::normalize_image_bytes_blocking(pic.data().to_vec())
     }
 
     /// Finds an image file inside `folder` (prioritizing cover/folder/thumb names), returning its bytes.
     pub fn find_folder_image_blocking(folder: &Path) -> Option<Vec<u8>> {
-        const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif"];
+        const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif", "jxl"];
         const PREFERRED_STEMS: &[&str] = &[
             "cover", "folder", "front", "album", "art", "artwork", "thumb", "thumbnail", "poster",
         ];
@@ -148,7 +207,9 @@ impl Scanner {
         for (_, _, img_path) in candidates {
             if let Ok(bytes) = std::fs::read(&img_path) {
                 if !bytes.is_empty() {
-                    return Some(bytes);
+                    if let Some(normalized) = Self::normalize_image_bytes_blocking(bytes) {
+                        return Some(normalized);
+                    }
                 }
             }
         }
