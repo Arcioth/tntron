@@ -647,13 +647,13 @@ impl TntronApp {
         theme: &ThemeSpec,
         override_size: Option<f32>,
     ) -> Element<'a, Message> {
-        let base_sz = override_size.unwrap_or(snap.logo.size_px).clamp(14.0, 96.0);
-        let beat_boost = if snap.logo.beat_pulse && snap.play_state == PlayState::Playing {
-            self.viz_beat * if override_size.is_some() { 4.0 } else { 2.2 }
+        // Keep layout size strictly constant so UI boxes never shift or twitch on audio beats.
+        let sz = override_size.unwrap_or(snap.logo.size_px).clamp(14.0, 96.0);
+        let beat_alpha_boost = if snap.logo.beat_pulse && snap.play_state == PlayState::Playing {
+            (self.viz_beat * 0.35).clamp(0.0, 0.35)
         } else {
             0.0
         };
-        let sz = base_sz + beat_boost;
         let tint = self.resolve_logo_tint(snap, theme);
 
         let is_custom_img =
@@ -672,7 +672,7 @@ impl TntronApp {
                 .content_fit(ContentFit::Contain)
                 .into()
         } else {
-            icons::icon(icons::MUSIC, (base_sz * 0.8).max(14.0), tint).into()
+            icons::icon(icons::MUSIC, (sz * 0.8).max(14.0), tint).into()
         };
 
         let frame_style = snap.logo.frame_style.as_str();
@@ -685,7 +685,10 @@ impl TntronApp {
             };
             let glow_shadow = if frame_style == "glow" {
                 iced::Shadow {
-                    color: Color { a: 0.55, ..tint },
+                    color: Color {
+                        a: (0.45 + beat_alpha_boost).min(0.92),
+                        ..tint
+                    },
                     offset: iced::Vector::ZERO,
                     blur_radius: 12.0,
                 }
