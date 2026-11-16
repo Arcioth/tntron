@@ -465,6 +465,8 @@ impl TntronApp {
                 "Connected ({})",
                 prev.socket_label.as_deref().unwrap_or("discord-ipc-0")
             )
+        } else if let Some(err) = &prev.error_message {
+            err.clone()
         } else {
             "Waiting for Discord / Vesktop IPC socket".to_string()
         };
@@ -591,14 +593,17 @@ impl TntronApp {
                 text("Placeholders for custom templates: {title} {artist} {album} {codec} {bpm} {speed} {pitch} {queue} {loop} {shuffle} {state}")
                     .size(11)
                     .color(theme.muted),
+                text("Setup: 1) discord.com/developers/applications -> New Application ('tntron')  2) Paste Application ID below & click Apply  3) Enable 'Activity Privacy -> Display current activity' in Discord.")
+                    .size(11)
+                    .color(theme.accent),
                 column![
-                    field_input("Client App ID", "client_id", &self.discord_client_id_draft, "1306739184569253928"),
+                    field_input("Client App ID", "client_id", &self.discord_client_id_draft, "Paste Application ID from discord.com/developers/applications"),
                     field_input("Custom Details", "custom_details", &self.discord_details_draft, "{title} · {bpm}"),
                     field_input("Custom State", "custom_state", &self.discord_state_draft, "{artist} · {album} · {codec}"),
                     field_input("Idle Text", "idle_text", &self.discord_idle_draft, "Browsing library · Idle"),
-                    field_input("Large Asset Key", "large_key", &self.discord_large_key_draft, "tntron_logo"),
+                    field_input("Large Asset Key", "large_key", &self.discord_large_key_draft, "Asset key or https://...png URL"),
                     field_input("Large Tooltip", "large_text", &self.discord_large_text_draft, "{album} · {codec}"),
-                    field_input("Small Asset Key", "small_key", &self.discord_small_key_draft, "tntron_play"),
+                    field_input("Small Asset Key", "small_key", &self.discord_small_key_draft, "Optional asset key or https://...png URL"),
                     field_input("Small Tooltip", "small_text", &self.discord_small_text_draft, "{state} · {speed}"),
                     field_input("Button Label", "button_label", &self.discord_btn_label_draft, "tntron on GitHub"),
                     field_input("Button URL", "button_url", &self.discord_btn_url_draft, "https://github.com/Arcioth/tntron"),

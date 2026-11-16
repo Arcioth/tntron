@@ -8,7 +8,8 @@ pub mod track;
 pub use analyzer::{analyze_track_blocking, TrackAnalysis};
 pub use browser::{
     copy_track_to_folder_in_jail, create_folder_in_jail, delete_file_in_jail, delete_folder_in_jail,
-    read_directory, rename_in_jail, resolve_in_jail, scan_all_tracks_in_jail, BrowserEntry,
+    read_directory, rename_in_jail, resolve_in_jail, scan_all_tracks_in_jail,
+    scan_playlist_folders_in_jail, BrowserEntry,
 };
 pub use cache::LruCache;
 pub use lrc::{

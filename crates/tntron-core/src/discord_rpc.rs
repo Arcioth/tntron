@@ -59,6 +59,7 @@ impl Default for DiscordPlaybackState {
 pub struct DiscordPreview {
     pub connected: bool,
     pub socket_label: Option<String>,
+    pub error_message: Option<String>,
     pub details: String,
     pub state: String,
     pub footer: String,
@@ -77,6 +78,7 @@ pub enum DiscordWorkerMsg {
 pub struct DiscordStatusHandle {
     connected: Arc<AtomicBool>,
     socket_label: Arc<Mutex<Option<String>>>,
+    error_message: Arc<Mutex<Option<String>>>,
 }
 
 impl DiscordStatusHandle {
@@ -86,6 +88,10 @@ impl DiscordStatusHandle {
 
     pub fn socket_label_blocking(&self) -> Option<String> {
         self.socket_label.try_lock().ok().and_then(|g| g.clone())
+    }
+
+    pub fn error_message_blocking(&self) -> Option<String> {
+        self.error_message.try_lock().ok().and_then(|g| g.clone())
     }
 }
 
@@ -497,11 +503,13 @@ pub fn build_preview(
     pb: &DiscordPlaybackState,
     connected: bool,
     socket_label: Option<String>,
+    error_message: Option<String>,
 ) -> DiscordPreview {
     if !cfg.enabled {
         return DiscordPreview {
             connected,
             socket_label,
+            error_message,
             details: "Rich Presence Disabled".to_string(),
             state: "Enable above to broadcast playback status to Discord".to_string(),
             footer: String::new(),
@@ -512,6 +520,7 @@ pub fn build_preview(
         return DiscordPreview {
             connected,
             socket_label,
+            error_message,
             details: "(Activity cleared)".to_string(),
             state: if pb.playing == PlayState::Paused && cfg.clear_on_pause {
                 "Cleared automatically while paused".to_string()
@@ -562,6 +571,7 @@ pub fn build_preview(
     DiscordPreview {
         connected,
         socket_label,
+        error_message,
         details,
         state,
         footer: foot_parts.join(" · "),
@@ -644,32 +654,60 @@ async fn read_ipc_frame(stream: &mut UnixStream) -> std::io::Result<(u32, Vec<u8
     Ok((op, body))
 }
 
-async fn connect_discord(client_id: &str) -> Option<(UnixStream, String)> {
-    let cid = if client_id.trim().is_empty() {
-        "1306739184569253928"
-    } else {
-        client_id.trim()
-    };
-    for path in candidate_socket_paths() {
-        if let Ok(mut stream) = UnixStream::connect(&path).await {
-            let handshake = json!({ "v": 1, "client_id": cid });
-            if write_ipc_frame(&mut stream, OP_HANDSHAKE, &handshake)
-                .await
-                .is_ok()
-                && tokio::time::timeout(Duration::from_secs(2), read_ipc_frame(&mut stream))
-                    .await
-                    .is_ok_and(|res| res.is_ok())
-            {
-                let label = Path::new(&path)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("discord-ipc-0")
-                    .to_string();
-                return Some((stream, label));
+async fn connect_discord(client_id: &str) -> Result<(UnixStream, String), String> {
+    let cid = client_id.trim();
+    if cid.is_empty() || cid == "1306739184569253928" {
+        return Err(
+            "Set your Discord Application ID (from discord.com/developers/applications) and click Apply"
+                .to_string(),
+        );
+    }
+
+    let candidates = candidate_socket_paths();
+    if candidates.is_empty() {
+        return Err("No Discord IPC socket found (open Discord / Vesktop)".to_string());
+    }
+
+    let mut last_err = String::from("Failed to handshake with Discord IPC");
+    for path in candidates {
+        match UnixStream::connect(&path).await {
+            Ok(mut stream) => {
+                let handshake = json!({ "v": 1, "client_id": cid });
+                if let Err(e) = write_ipc_frame(&mut stream, OP_HANDSHAKE, &handshake).await {
+                    last_err = format!("Discord IPC write error: {e}");
+                    continue;
+                }
+                match tokio::time::timeout(Duration::from_secs(6), read_ipc_frame(&mut stream)).await {
+                    Ok(Ok((op, body))) => {
+                        let parsed = serde_json::from_slice::<Value>(&body).ok();
+                        let evt = parsed
+                            .as_ref()
+                            .and_then(|v| v.get("evt"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let msg = parsed
+                            .as_ref()
+                            .and_then(|v| v.get("message").or_else(|| v.get("data").and_then(|d| d.get("message"))))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Handshake rejected");
+                        if op == OP_FRAME && evt != "ERROR" {
+                            let label = Path::new(&path)
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("discord-ipc-0")
+                                .to_string();
+                            return Ok((stream, label));
+                        }
+                        last_err = format!("Discord rejected Client ID ({msg})");
+                    }
+                    Ok(Err(e)) => last_err = format!("Discord IPC closed: {e}"),
+                    Err(_) => last_err = "Discord handshake timed out".to_string(),
+                }
             }
+            Err(e) => last_err = format!("Cannot connect to {}: {e}", path.display()),
         }
     }
-    None
+    Err(last_err)
 }
 
 async fn send_activity(
@@ -677,7 +715,7 @@ async fn send_activity(
     cfg: &DiscordRpcConfig,
     pb: &DiscordPlaybackState,
     nonce: u64,
-) -> std::io::Result<()> {
+) -> Result<(), String> {
     let activity = build_activity_json(cfg, pb, epoch_now_sec());
     let payload = json!({
         "cmd": "SET_ACTIVITY",
@@ -687,9 +725,24 @@ async fn send_activity(
         },
         "nonce": format!("tntron-{nonce}"),
     });
-    write_ipc_frame(stream, OP_FRAME, &payload).await?;
-    // Drain acknowledgement cleanly without blocking playback loop if Discord lags slightly.
-    let _ = tokio::time::timeout(Duration::from_millis(250), read_ipc_frame(stream)).await;
+    write_ipc_frame(stream, OP_FRAME, &payload)
+        .await
+        .map_err(|e| format!("IPC write failed: {e}"))?;
+    if let Ok(Ok((op, body))) =
+        tokio::time::timeout(Duration::from_millis(450), read_ipc_frame(stream)).await
+    {
+        if let Ok(val) = serde_json::from_slice::<Value>(&body) {
+            if op == 2 || val.get("evt").and_then(|v| v.as_str()) == Some("ERROR") {
+                let msg = val
+                    .get("data")
+                    .and_then(|d| d.get("message"))
+                    .or_else(|| val.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("SET_ACTIVITY error");
+                return Err(format!("Discord error: {msg}"));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -698,9 +751,11 @@ pub fn spawn_discord_worker() -> (mpsc::Sender<DiscordWorkerMsg>, DiscordStatusH
     let (tx, mut rx) = mpsc::channel::<DiscordWorkerMsg>(32);
     let connected = Arc::new(AtomicBool::new(false));
     let socket_label = Arc::new(Mutex::new(None));
+    let error_message = Arc::new(Mutex::new(None));
     let handle = DiscordStatusHandle {
         connected: Arc::clone(&connected),
         socket_label: Arc::clone(&socket_label),
+        error_message: Arc::clone(&error_message),
     };
 
     tokio::spawn(async move {
@@ -765,23 +820,33 @@ pub fn spawn_discord_worker() -> (mpsc::Sender<DiscordWorkerMsg>, DiscordStatusH
                 }
                 connected.store(false, Ordering::Relaxed);
                 *socket_label.lock().await = None;
+                *error_message.lock().await = None;
                 continue;
             }
 
             if conn.is_none() {
-                if let Some((stream, label)) = connect_discord(&cfg.client_id).await {
-                    connected.store(true, Ordering::Relaxed);
-                    *socket_label.lock().await = Some(label.clone());
-                    conn = Some((stream, label, cfg.client_id.trim().to_string()));
+                match connect_discord(&cfg.client_id).await {
+                    Ok((stream, label)) => {
+                        connected.store(true, Ordering::Relaxed);
+                        *socket_label.lock().await = Some(label.clone());
+                        *error_message.lock().await = None;
+                        conn = Some((stream, label, cfg.client_id.trim().to_string()));
+                    }
+                    Err(err) => {
+                        connected.store(false, Ordering::Relaxed);
+                        *socket_label.lock().await = None;
+                        *error_message.lock().await = Some(err);
+                    }
                 }
             }
 
             if let Some((stream, _, _)) = &mut conn {
                 nonce = nonce.wrapping_add(1);
-                if send_activity(stream, cfg, pb, nonce).await.is_err() {
+                if let Err(err) = send_activity(stream, cfg, pb, nonce).await {
                     conn = None;
                     connected.store(false, Ordering::Relaxed);
                     *socket_label.lock().await = None;
+                    *error_message.lock().await = Some(err);
                 }
             }
         }

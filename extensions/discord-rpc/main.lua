@@ -2,7 +2,7 @@
 
 local DEFAULTS = {
     enabled = true,
-    client_id = "1306739184569253928",
+    client_id = "",
     activity_type = 2,
     show_title = true,
     show_artist = true,
@@ -22,9 +22,9 @@ local DEFAULTS = {
     state_mode = "auto",
     custom_details = "{title} · {bpm}",
     custom_state = "{artist} · {album} · {codec}",
-    large_image_key = "tntron_logo",
+    large_image_key = "https://raw.githubusercontent.com/Arcioth/tntron/main/assets/icons/hicolor/256x256/apps/tntron.png",
     large_text = "{album} · {codec}",
-    small_image_key = "tntron_play",
+    small_image_key = "",
     small_text = "{state} · {speed}",
     show_button = true,
     button_label = "tntron on GitHub",
@@ -88,7 +88,7 @@ local function render()
             tntron.ui.toggle("show_button",       "Action Button", st.cfg.show_button),
         }),
         tntron.ui.input("client_id", "Discord App Client ID", st.cfg.client_id, {
-            placeholder = "1306739184569253928",
+            placeholder = "Paste Application ID from discord.com/developers/applications",
             submit_action = "set_client_id",
             submit_label = "Apply",
         }),

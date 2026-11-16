@@ -26,8 +26,8 @@ use crate::ipc::{default_cover_cache_path, run_ipc_server, write_status_file, Tn
 use crate::library::{
     analyze_track_blocking, copy_track_to_folder_in_jail, create_folder_in_jail,
     delete_file_in_jail, delete_folder_in_jail, load_companion_lrc, read_directory, rename_in_jail,
-    resolve_in_jail, scan_all_tracks_in_jail, BrowserEntry, LruCache, LyricLine, MetadataPatch,
-    Scanner, Track, TrackAnalysis,
+    resolve_in_jail, scan_all_tracks_in_jail, scan_playlist_folders_in_jail, BrowserEntry,
+    LruCache, LyricLine, MetadataPatch, Scanner, Track, TrackAnalysis,
 };
 use crate::network;
 use crate::storage::{
@@ -1608,20 +1608,17 @@ impl CoreState {
 
     pub fn refresh_root_folders(&mut self) {
         let old_cards = std::mem::take(&mut self.folder_cards);
-        let root_entries = read_directory(&self.music_root, &self.music_root);
-        self.folder_cards = root_entries
+        let folders = scan_playlist_folders_in_jail(&self.music_root);
+        self.folder_cards = folders
             .into_iter()
-            .filter_map(|e| match e {
-                BrowserEntry::Directory { name, path } => {
-                    let prev = old_cards.iter().find(|c| c.path == path);
-                    Some(FolderCard {
-                        name,
-                        path,
-                        track_count: prev.map(|c| c.track_count).unwrap_or(0),
-                        cover_art: prev.and_then(|c| c.cover_art.clone()),
-                    })
+            .map(|(name, path)| {
+                let prev = old_cards.iter().find(|c| c.path == path);
+                FolderCard {
+                    name,
+                    path,
+                    track_count: prev.map(|c| c.track_count).unwrap_or(0),
+                    cover_art: prev.and_then(|c| c.cover_art.clone()),
                 }
-                _ => None,
             })
             .collect();
     }
@@ -1789,16 +1786,23 @@ impl CoreState {
             .as_ref()
             .and_then(|t| self.persisted.saved_loops.get(&t.path).copied());
 
-        let (discord_connected, discord_socket) = self
+        let (discord_connected, discord_socket, discord_error) = self
             .discord_status
             .as_ref()
-            .map(|h| (h.is_connected(), h.socket_label_blocking()))
-            .unwrap_or((false, None));
+            .map(|h| {
+                (
+                    h.is_connected(),
+                    h.socket_label_blocking(),
+                    h.error_message_blocking(),
+                )
+            })
+            .unwrap_or((false, None, None));
         let discord_preview = build_preview(
             &self.persisted.discord_rpc,
             &self.discord_playback_state(),
             discord_connected,
             discord_socket,
+            discord_error,
         );
 
         UiSnapshot {

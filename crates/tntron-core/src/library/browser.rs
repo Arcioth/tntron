@@ -90,6 +90,85 @@ pub fn read_directory(dir: &Path, root_boundary: &Path) -> Vec<BrowserEntry> {
     items
 }
 
+fn is_ignored_dir_name(name: &str) -> bool {
+    name.starts_with('.') || matches!(name, "node_modules" | "__pycache__")
+}
+
+fn dir_has_direct_audio(dir: &Path) -> bool {
+    let Ok(rd) = fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in rd.filter_map(|e| e.ok()) {
+        if let Ok(ft) = entry.file_type() {
+            if ft.is_file() && Track::is_audio_file(&entry.path()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Collects direct folders and audio-containing subfolders inside `root_boundary` as playlists.
+pub fn scan_playlist_folders_in_jail(root_boundary: &Path) -> Vec<(String, PathBuf)> {
+    const MAX_DEPTH: usize = 4;
+
+    fn walk(
+        dir: &Path,
+        root: &Path,
+        prefix: &str,
+        depth: usize,
+        out: &mut Vec<(String, PathBuf)>,
+    ) -> bool {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return false;
+        };
+        let mut subdirs: Vec<(String, PathBuf)> = Vec::new();
+        for entry in entries.filter_map(|e| e.ok()) {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() || !ft.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if is_ignored_dir_name(&name) {
+                continue;
+            }
+            if let Some(jailed) = resolve_in_jail(root, &entry.path()) {
+                subdirs.push((name, jailed));
+            }
+        }
+        subdirs.sort_by(|a, b| ascii_case_cmp(&a.0, &b.0));
+
+        let mut any_audio_below = false;
+        for (name, path) in subdirs {
+            let label = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix} / {name}")
+            };
+            let direct_audio = dir_has_direct_audio(&path);
+            let mut nested = Vec::new();
+            let nested_has_audio = if depth < MAX_DEPTH {
+                walk(&path, root, &label, depth + 1, &mut nested)
+            } else {
+                false
+            };
+
+            if depth == 1 || direct_audio || nested_has_audio {
+                out.push((label, path));
+                out.extend(nested);
+                any_audio_below = true;
+            }
+        }
+        any_audio_below
+    }
+
+    let mut out = Vec::new();
+    walk(root_boundary, root_boundary, "", 1, &mut out);
+    out
+}
+
 /// Recursively collects all non-symlink audio tracks inside `root_boundary`, sorted by path.
 pub fn scan_all_tracks_in_jail(root_boundary: &Path) -> Vec<Track> {
     fn walk(dir: &Path, root: &Path, out: &mut Vec<Track>) {
@@ -107,6 +186,11 @@ pub fn scan_all_tracks_in_jail(root_boundary: &Path) -> Vec<Track> {
             }
             let p = entry.path();
             if ft.is_dir() {
+                let file_name = entry.file_name();
+                let name = file_name.to_string_lossy();
+                if is_ignored_dir_name(&name) {
+                    continue;
+                }
                 if let Some(jailed) = resolve_in_jail(root, &p) {
                     subdirs.push(jailed);
                 }
@@ -280,6 +364,40 @@ mod tests {
         assert!(delete_folder_in_jail(&root, &root).is_err());
         delete_folder_in_jail(&root, &renamed).unwrap();
         assert!(!renamed.exists());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_recursive_subfolders_added_as_playlists() {
+        let tmp = std::env::temp_dir().join(format!(
+            "tntron_test_subfolders_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("yt/Best Phonk")).unwrap();
+        fs::create_dir_all(tmp.join("yt/HARD")).unwrap();
+        fs::create_dir_all(tmp.join("HARD")).unwrap();
+        fs::create_dir_all(tmp.join("EmptyTop")).unwrap();
+        fs::create_dir_all(tmp.join("yt/EmptyNested")).unwrap();
+        fs::create_dir_all(tmp.join(".hidden")).unwrap();
+
+        fs::write(tmp.join("yt/Best Phonk/a.mp3"), b"mp3").unwrap();
+        fs::write(tmp.join("yt/HARD/b.mp3"), b"mp3").unwrap();
+        fs::write(tmp.join("HARD/c.mp3"), b"mp3").unwrap();
+        fs::write(tmp.join(".hidden/secret.mp3"), b"mp3").unwrap();
+
+        let root = tmp.canonicalize().unwrap();
+        let cards = scan_playlist_folders_in_jail(&root);
+        let names: Vec<&str> = cards.iter().map(|(n, _)| n.as_str()).collect();
+
+        assert!(names.contains(&"EmptyTop"));
+        assert!(names.contains(&"HARD"));
+        assert!(names.contains(&"yt"));
+        assert!(names.contains(&"yt / Best Phonk"));
+        assert!(names.contains(&"yt / HARD"));
+        assert!(!names.contains(&"yt / EmptyNested"));
+        assert!(!names.contains(&".hidden"));
 
         let _ = fs::remove_dir_all(&tmp);
     }

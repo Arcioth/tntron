@@ -9,11 +9,11 @@ local function find_folder(folders, path)
     return folders[1]
 end
 
-local function tracks_in_folder(all_tracks, folder_name, folder_path)
+local function tracks_in_folder(all_tracks, _folder_name, folder_path)
     local out = {}
     local prefix = folder_path .. "/"
     for _, t in ipairs(all_tracks) do
-        if t.folder == folder_name or (type(t.path) == "string" and t.path:sub(1, #prefix) == prefix) then
+        if type(t.path) == "string" and t.path:sub(1, #prefix) == prefix then
             table.insert(out, t)
         end
     end

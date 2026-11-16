@@ -641,7 +641,7 @@ impl Default for DiscordRpcConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            client_id: "1306739184569253928".to_string(),
+            client_id: String::new(),
             activity_type: 2,
             show_title: true,
             show_artist: true,
@@ -661,9 +661,9 @@ impl Default for DiscordRpcConfig {
             state_mode: "auto".to_string(),
             custom_details: "{title} · {bpm}".to_string(),
             custom_state: "{artist} · {album} · {codec}".to_string(),
-            large_image_key: "tntron_logo".to_string(),
+            large_image_key: "https://raw.githubusercontent.com/Arcioth/tntron/main/assets/icons/hicolor/256x256/apps/tntron.png".to_string(),
             large_text: "{album} · {codec}".to_string(),
-            small_image_key: "tntron_play".to_string(),
+            small_image_key: String::new(),
             small_text: "{state} · {speed}".to_string(),
             show_button: true,
             button_label: "tntron on GitHub".to_string(),
