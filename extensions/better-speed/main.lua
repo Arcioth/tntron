@@ -41,14 +41,8 @@ end
 local function build_filter()
     if not st.enabled then return "" end
     local stages = {}
-    if math.abs(st.pitch_st) >= 0.05 then
-        local scale = math.max(0.05, math.min(4.0, effective_pitch_ratio()))
-        local formant = st.preserve_formant and "preserved" or "shifted"
-        table.insert(stages, string.format(
-            "rubberband=pitch-scale=%.5f:formant=%s:engine=finer",
-            scale, formant
-        ))
-    end
+    -- Core engine natively handles Vinyl Link via audio-pitch-correction=no
+    -- and independent pitch shifting via rubberband; extension adds reverb.
     if st.reverb >= 0.05 then
         table.insert(stages, string.format("aecho=0.80:0.88:55:%.2f", st.reverb))
     end
@@ -76,6 +70,9 @@ end
 
 local function sync_audio_and_ui()
     local target_speed = st.enabled and st.speed or 1.00
+    local target_pitch = st.enabled and st.pitch_st or 0.0
+    local target_link = st.enabled and st.link_pitch or false
+    tntron.audio.set_pitch(target_pitch, target_link, st.preserve_formant)
     tntron.playback.set_speed(target_speed)
 
     local af = build_filter()

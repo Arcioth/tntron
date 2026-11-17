@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -28,7 +29,8 @@ use crate::ipc::{
     IpcThemeItem, McBridgeHandle, McTelemetry, TntronStatus, BUILTIN_THEME_ITEMS,
 };
 use crate::library::{
-    analyze_track_blocking, copy_track_to_folder_in_jail, create_folder_in_jail,
+    analyze_stream_progressive, analyze_track_blocking, copy_track_to_folder_in_jail,
+    create_folder_in_jail,
     delete_file_in_jail, delete_folder_in_jail, load_companion_lrc, read_directory, rename_in_jail,
     resolve_in_jail, scan_all_tracks_in_jail, scan_playlist_folders_in_jail, BrowserEntry,
     LruCache, LyricLine, MetadataPatch, Scanner, Track, TrackAnalysis,
@@ -104,6 +106,7 @@ pub struct CommandEffects {
     pub scan_paths: Vec<PathBuf>,
     pub reload_cards: bool,
     pub track_asset_target: Option<PathBuf>,
+    pub stream_analysis_target: Option<PathBuf>,
     pub ext_jobs: Vec<(String, AsyncExtJob)>,
     pub open_ext_tab: Option<(String, String)>,
     pub clipboard_copy: Option<String>,
@@ -552,6 +555,10 @@ impl CoreState {
             self.persisted.pitch_st = self.persisted.pitch_st.clamp(-12.0, 12.0);
         }
         self.clock.set_speed(self.speed);
+        // Disable mpv's built-in scaletempo2 pitch correction during Vinyl Link so speed changes
+        // shift both tempo and pitch natively, just like an analog turntable/tape deck.
+        fx.mpv_cmds
+            .push(MpvCommand::SetPitchCorrection(!self.persisted.link_pitch));
         fx.mpv_cmds.push(MpvCommand::SetSpeed(self.speed));
         fx.mpv_cmds
             .push(MpvCommand::SetAudioFilter(self.effective_audio_filter()));
@@ -894,13 +901,13 @@ impl CoreState {
                 }
                 ExtHostCommand::PlaybackNext => {
                     if let Some(c) = self.advance_next(false) {
-                        fx.track_asset_target = self.current_track.as_ref().map(|t| t.path.clone());
+                        self.assign_track_targets(fx);
                         fx.mpv_cmds.push(c);
                     }
                 }
                 ExtHostCommand::PlaybackPrev => {
                     if let Some(c) = self.step_prev() {
-                        fx.track_asset_target = self.current_track.as_ref().map(|t| t.path.clone());
+                        self.assign_track_targets(fx);
                         fx.mpv_cmds.push(c);
                     }
                 }
@@ -1161,6 +1168,9 @@ impl CoreState {
                         self.persisted.preserve_formant = pf;
                     }
                     self.persisted.pitch_st = pitch_st.clamp(-12.0, 12.0);
+                    if self.persisted.link_pitch {
+                        self.speed = 2.0_f64.powf(self.persisted.pitch_st / 12.0).clamp(0.25, 3.0);
+                    }
                     self.apply_speed_and_pitch(fx);
                 }
                 ExtHostCommand::UiSetLayoutConfig { patch } => {
@@ -1296,7 +1306,7 @@ impl CoreState {
                 }
             }
         }
-        if !has_ext_rubberband && self.persisted.pitch_st.abs() >= 0.05 {
+        if !has_ext_rubberband && !self.persisted.link_pitch && self.persisted.pitch_st.abs() >= 0.05 {
             let pitch_scale = 2.0_f64.powf(self.persisted.pitch_st / 12.0);
             let formant = if self.persisted.preserve_formant {
                 "preserved"
@@ -1996,16 +2006,19 @@ impl CoreState {
         }
     }
 
-    fn emit_track_start(&mut self, fx: &mut CommandEffects, load_cmd: MpvCommand) {
+    fn assign_track_targets(&self, fx: &mut CommandEffects) {
         if let Some(cur) = &self.current_track {
             let path_str = cur.path.to_string_lossy();
-            if !path_str.starts_with("http://")
-                && !path_str.starts_with("https://")
-                && cur.path.exists()
-            {
+            if path_str.starts_with("http://") || path_str.starts_with("https://") {
+                fx.stream_analysis_target = Some(cur.path.clone());
+            } else if cur.path.exists() {
                 fx.track_asset_target = Some(cur.path.clone());
             }
         }
+    }
+
+    fn emit_track_start(&mut self, fx: &mut CommandEffects, load_cmd: MpvCommand) {
+        self.assign_track_targets(fx);
         fx.mpv_cmds.push(load_cmd);
         fx.mpv_cmds.push(MpvCommand::SetPause(false));
         self.dispatch_ext_event("trackChange", fx);
@@ -2410,18 +2423,25 @@ impl CoreState {
                 self.apply_speed_and_pitch(&mut fx);
             }
             CoreCommand::SetPitchSemitones(st) => {
-                self.persisted.link_pitch = false;
                 self.persisted.pitch_st = st.clamp(-12.0, 12.0);
+                if self.persisted.link_pitch {
+                    self.speed = 2.0_f64.powf(self.persisted.pitch_st / 12.0).clamp(0.25, 3.0);
+                }
                 self.apply_speed_and_pitch(&mut fx);
             }
             CoreCommand::StepPitchSemitones(delta) => {
-                self.persisted.link_pitch = false;
                 self.persisted.pitch_st =
-                    ((self.persisted.pitch_st + delta) * 10.0).round() / 10.0;
+                    (((self.persisted.pitch_st + delta) * 10.0).round() / 10.0).clamp(-12.0, 12.0);
+                if self.persisted.link_pitch {
+                    self.speed = 2.0_f64.powf(self.persisted.pitch_st / 12.0).clamp(0.25, 3.0);
+                }
                 self.apply_speed_and_pitch(&mut fx);
             }
             CoreCommand::SetLinkPitch(link) => {
                 self.persisted.link_pitch = link;
+                if link && (self.speed - 1.0).abs() < 0.005 && self.persisted.pitch_st.abs() >= 0.05 {
+                    self.speed = 2.0_f64.powf(self.persisted.pitch_st / 12.0).clamp(0.25, 3.0);
+                }
                 self.apply_speed_and_pitch(&mut fx);
             }
             CoreCommand::SetPreserveFormant(preserve) => {
@@ -4114,6 +4134,19 @@ fn spawn_track_analysis(path: PathBuf, tx: mpsc::Sender<(PathBuf, Option<TrackAn
     });
 }
 
+fn spawn_stream_analysis(
+    stream_url: PathBuf,
+    cancel: Arc<AtomicBool>,
+    tx: mpsc::Sender<(PathBuf, Option<TrackAnalysis>)>,
+) {
+    tokio::task::spawn_blocking(move || {
+        let url_str = stream_url.to_string_lossy().into_owned();
+        analyze_stream_progressive(&url_str, &stream_url, &cancel, |analysis| {
+            let _ = tx.blocking_send((stream_url.clone(), Some(analysis)));
+        });
+    });
+}
+
 /// Spawns the headless mpv supervisor, metadata & folder card scanners, IPC server, and core loop.
 pub async fn run_core_runtime(
     music_root: PathBuf,
@@ -4151,6 +4184,9 @@ pub async fn run_core_runtime(
                     error!("mpv actor error: {e}");
                 }
             });
+            let _ = mpv_cmd_tx
+                .send(MpvCommand::SetPitchCorrection(!state.persisted.link_pitch))
+                .await;
             let init_af = state.effective_audio_filter();
             if !init_af.is_empty() {
                 let _ = mpv_cmd_tx.send(MpvCommand::SetAudioFilter(init_af)).await;
@@ -4199,6 +4235,7 @@ pub async fn run_core_runtime(
     ui_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     viz_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut active_stream_cancel: Option<Arc<AtomicBool>> = None;
 
     loop {
         tokio::select! {
@@ -4217,6 +4254,7 @@ pub async fn run_core_runtime(
                     &asset_tx,
                     &analysis_tx,
                     &ext_async_tx,
+                    &mut active_stream_cancel,
                 ).await;
                 last_published_lyric = state.current_lyric_line();
                 publish_state(&state, &status_watch_tx, &broadcast_tx, &ui_tx).await;
@@ -4230,6 +4268,9 @@ pub async fn run_core_runtime(
                     let _ = ui_tx.send(CoreUpdate::RequestClipboardPaste { ext_id }).await;
                 }
                 if is_shutdown {
+                    if let Some(cancel) = active_stream_cancel.take() {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
                     break;
                 }
             }
@@ -4244,6 +4285,7 @@ pub async fn run_core_runtime(
                     &asset_tx,
                     &analysis_tx,
                     &ext_async_tx,
+                    &mut active_stream_cancel,
                 ).await;
                 last_published_lyric = state.current_lyric_line();
                 publish_state(&state, &status_watch_tx, &broadcast_tx, &ui_tx).await;
@@ -4259,6 +4301,7 @@ pub async fn run_core_runtime(
                     &asset_tx,
                     &analysis_tx,
                     &ext_async_tx,
+                    &mut active_stream_cancel,
                 ).await;
                 last_published_lyric = state.current_lyric_line();
                 publish_state(&state, &status_watch_tx, &broadcast_tx, &ui_tx).await;
@@ -4359,9 +4402,18 @@ async fn apply_effects(
     asset_tx: &mpsc::Sender<(PathBuf, Option<Vec<u8>>)>,
     analysis_tx: &mpsc::Sender<(PathBuf, Option<TrackAnalysis>)>,
     ext_async_tx: &mpsc::Sender<ExtAsyncResult>,
+    stream_cancel: &mut Option<Arc<AtomicBool>>,
 ) {
     for mc in fx.mpv_cmds {
         let _ = mpv_cmd_tx.send(mc).await;
+    }
+    if state.play_state == PlayState::Stopped
+        || fx.track_asset_target.is_some()
+        || fx.stream_analysis_target.is_some()
+    {
+        if let Some(prev) = stream_cancel.take() {
+            prev.store(true, Ordering::Relaxed);
+        }
     }
     if !fx.scan_paths.is_empty() {
         Scanner::scan_paths_in_background(fx.scan_paths, scan_tx.clone());
@@ -4374,6 +4426,11 @@ async fn apply_effects(
         if p.exists() {
             spawn_track_analysis(p, analysis_tx.clone());
         }
+    }
+    if let Some(url_path) = fx.stream_analysis_target {
+        let cancel = Arc::new(AtomicBool::new(false));
+        *stream_cancel = Some(Arc::clone(&cancel));
+        spawn_stream_analysis(url_path, cancel, analysis_tx.clone());
     }
     for (ext_id, job) in fx.ext_jobs {
         spawn_ext_async_job(ext_id, job, ext_async_tx.clone());
@@ -4871,6 +4928,69 @@ mod tests {
         assert_eq!(local.persisted.profile.stats_total_sec, 4200);
         assert_eq!(local.persisted.profile.stats_total_plays, 33);
         assert!(local.pending_profile_import.is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_vinyl_link_pitch_and_stream_analysis_targets() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tntron_vinyl_stream_{unique}"));
+        let music = root.join("music");
+        let ext_dir = root.join("exts");
+        std::fs::create_dir_all(&music).unwrap();
+        std::fs::create_dir_all(&ext_dir).unwrap();
+
+        let mut s = CoreState::with_paths(music, None, Some(ext_dir));
+
+        // Enable Vinyl Link and step pitch up +2.0 st: link_pitch must stay ON,
+        // speed must update to 2^(2/12), mpv must receive audio-pitch-correction=false,
+        // and rubberband must NOT double-stack on top of native pitch-speed coupling.
+        let fx_link = s.handle_command(CoreCommand::SetLinkPitch(true));
+        assert!(s.persisted.link_pitch);
+        assert!(fx_link
+            .mpv_cmds
+            .contains(&MpvCommand::SetPitchCorrection(false)));
+
+        let fx_pitch = s.handle_command(CoreCommand::StepPitchSemitones(2.0));
+        assert!(s.persisted.link_pitch);
+        assert!((s.persisted.pitch_st - 2.0).abs() < 0.05);
+        assert!((s.speed - 2.0_f64.powf(2.0 / 12.0)).abs() < 0.01);
+        assert!(fx_pitch
+            .mpv_cmds
+            .contains(&MpvCommand::SetPitchCorrection(false)));
+        assert!(!fx_pitch.mpv_cmds.iter().any(|c| matches!(
+            c,
+            MpvCommand::SetAudioFilter(f) if f.contains("rubberband=")
+        )));
+
+        // Unlinking keeps independent pitch shift active via rubberband + pitch correction ON.
+        let fx_unlink = s.handle_command(CoreCommand::SetLinkPitch(false));
+        assert!(!s.persisted.link_pitch);
+        assert!(fx_unlink
+            .mpv_cmds
+            .contains(&MpvCommand::SetPitchCorrection(true)));
+        assert!(fx_unlink.mpv_cmds.iter().any(|c| matches!(
+            c,
+            MpvCommand::SetAudioFilter(f) if f.contains("rubberband=pitch-scale=")
+        )));
+
+        // YouTube stream playback result must schedule progressive stream analysis.
+        let fx_yt = s.handle_ext_async_result(ExtAsyncResult {
+            ext_id: "openify.yt-dlp".into(),
+            event_name: "ytPlaying".into(),
+            payload: serde_json::json!({ "ok": true, "title": "YT Live" }),
+            stream_play: Some((
+                "https://rr1---sn-example.googlevideo.com/videoplayback?id=1".into(),
+                "YT Live".into(),
+            )),
+            rescan_after: false,
+        });
+        assert!(fx_yt.stream_analysis_target.is_some());
+        assert!(fx_yt.track_asset_target.is_none());
 
         let _ = std::fs::remove_dir_all(&root);
     }

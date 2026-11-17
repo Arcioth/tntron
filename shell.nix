@@ -27,6 +27,7 @@ pkgs.mkShell {
 
   buildInputs = with pkgs; [
     mpv
+    ffmpeg-headless
     libjxl
     imagemagick
     yt-dlp

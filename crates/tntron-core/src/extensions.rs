@@ -2947,9 +2947,14 @@ end
         assert!(speed_cmds
             .iter()
             .any(|(_, c)| matches!(c, ExtHostCommand::SetSpeed { speed } if (*speed - 1.25).abs() < 0.01)));
-        assert!(speed_cmds
-            .iter()
-            .any(|(_, c)| matches!(c, ExtHostCommand::SetAudioFilter { filter } if filter.contains("rubberband=pitch-scale="))));
+        assert!(speed_cmds.iter().any(|(_, c)| matches!(
+            c,
+            ExtHostCommand::AudioSetPitch {
+                pitch_st,
+                link_pitch: Some(true),
+                ..
+            } if *pitch_st > 3.0
+        )));
 
         let sleep_cmds = host.dispatch_action(
             "tunotron.sleep-timer",

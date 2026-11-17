@@ -5,7 +5,7 @@ pub mod lrc;
 pub mod scanner;
 pub mod track;
 
-pub use analyzer::{analyze_track_blocking, TrackAnalysis};
+pub use analyzer::{analyze_stream_progressive, analyze_track_blocking, TrackAnalysis};
 pub use browser::{
     copy_track_to_folder_in_jail, create_folder_in_jail, delete_file_in_jail, delete_folder_in_jail,
     read_directory, rename_in_jail, resolve_in_jail, scan_all_tracks_in_jail,

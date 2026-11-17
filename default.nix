@@ -4,6 +4,7 @@
   pkg-config,
   makeWrapper,
   mpv,
+  ffmpeg-headless,
   libjxl,
   imagemagick,
   yt-dlp,
@@ -35,6 +36,7 @@ let
 
   runtimeBins = [
     mpv
+    ffmpeg-headless
     libjxl
     imagemagick
     yt-dlp

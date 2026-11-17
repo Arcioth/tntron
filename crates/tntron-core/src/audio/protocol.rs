@@ -56,6 +56,7 @@ pub enum MpvCommand {
     Seek { seconds: f64, relative: bool },
     SetVolume(f64),
     SetSpeed(f64),
+    SetPitchCorrection(bool),
     SetMute(bool),
     SetAudioFilter(String),
     Stop,
@@ -96,6 +97,14 @@ impl MpvCommand {
             },
             Self::SetSpeed(speed) => MpvRequest {
                 command: vec!["set_property".into(), "speed".into(), (*speed).into()],
+                request_id: req_id,
+            },
+            Self::SetPitchCorrection(enabled) => MpvRequest {
+                command: vec![
+                    "set_property".into(),
+                    "audio-pitch-correction".into(),
+                    (*enabled).into(),
+                ],
                 request_id: req_id,
             },
             Self::SetMute(mute) => MpvRequest {
