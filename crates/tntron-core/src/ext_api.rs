@@ -21,6 +21,7 @@ pub const VALID_PERMISSIONS: &[&str] = &[
     "notify",
     "network",
     "hw:control",
+    "mc:link",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -380,6 +381,9 @@ pub enum ExtHostCommand {
         enabled: bool,
         orbit_hz: f64,
     },
+    AudioSetPreset {
+        preset: String,
+    },
     AudioSetPitch {
         pitch_st: f64,
         #[serde(default)]
@@ -430,6 +434,14 @@ pub enum ExtHostCommand {
     HwDaeboardStop,
     HwDaetronStart,
     HwDaetronReload,
+    McSetConfig {
+        patch: serde_json::Value,
+    },
+    McSendNotice {
+        kind: String,
+        title: String,
+        body: String,
+    },
 }
 
 #[derive(Debug, Clone)]

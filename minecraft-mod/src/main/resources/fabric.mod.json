@@ -1,0 +1,28 @@
+{
+	"schemaVersion": 1,
+	"id": "tntron",
+	"version": "${version}",
+	"name": "tntron Link",
+	"description": "Full in-game controller, HUD visualizer, synced lyrics, library browser, DSP/EQ/pitch rack, theme switcher, and game-reactive audio bridge for tntron.",
+	"authors": [
+		"Arcioth"
+	],
+	"contact": {
+		"homepage": "https://github.com/Arcioth/tntron",
+		"sources": "https://github.com/Arcioth/tntron"
+	},
+	"license": "MIT",
+	"icon": "assets/tntron/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			"com.arcioth.tntron.TntronClientMod"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.20.1",
+		"minecraft": "~26.2",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}

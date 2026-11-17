@@ -27,6 +27,12 @@ jobs:
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Java 25 for Fabric 26.2 mod
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '25'
+
       - name: Cache Cargo crates & target
         uses: actions/cache@v4
         with:
@@ -35,6 +41,16 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('minecraft-mod/**/*.gradle*', 'minecraft-mod/gradle.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
 
       - name: Fetch existing nightly GIFs pack if available
         env:
@@ -50,13 +66,29 @@ jobs:
           chmod +x scripts/build-nightly.sh
           TNTRON_GIFS_DIR="$PWD/assets/gifs" NIGHTLY_TAG="nightly" bash scripts/build-nightly.sh
 
+      - name: Build Fabric 26.2 Minecraft mod JAR
+        run: |
+          chmod +x minecraft-mod/gradlew
+          ./minecraft-mod/gradlew -p minecraft-mod build --no-daemon
+          mkdir -p dist
+          MOD_JAR=$(find minecraft-mod/build/libs -maxdepth 1 -name 'tntron-fabric-*.jar' ! -name '*-sources.jar' | head -n1)
+          if [ -z "$MOD_JAR" ]; then
+            echo "ERROR: Built Fabric mod jar not found in minecraft-mod/build/libs" >&2
+            exit 1
+          fi
+          cp "$MOD_JAR" dist/
+          (cd dist && sha256sum "$(basename "$MOD_JAR")" > "$(basename "$MOD_JAR").sha256")
+          ls -lh dist/tntron-fabric-*.jar
+
       - name: Publish Nightly Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: nightly
-          name: Nightly Build (with GIFs & Extensions)
+          name: Nightly Build (with GIFs, Extensions & Fabric 26.2 Mod)
           prerelease: true
           files: |
             dist/tntron-nightly-linux-*.tar.gz
             dist/tntron-nightly-linux-*.sha256
             dist/tntron-gifs-pack.tar.gz
+            dist/tntron-fabric-*.jar
+            dist/tntron-fabric-*.sha256

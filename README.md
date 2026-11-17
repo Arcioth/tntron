@@ -34,6 +34,8 @@
 - **Native Multi-DE/WM & Fullscreen Support**:
   - First-class Wayland (`application_id = "tntron"`) and X11 (`WM_CLASS = tntron`) integration across **XFCE, Hyprland, Sway, KDE Plasma, GNOME, i3, COSMIC, MATE, and LXQt**.
   - Native `F11` fullscreen toggle and terminal popup visualizer (`tntron-ctl`).
+- **Minecraft Fabric 26.2 Mod & `minecraft-link` Extension**:
+  - Full in-game Fabric 26.2 control center (`F8` / `/tntron`), real-time 16-band spectrum & cover art HUD (`F10`), synced karaoke lyrics, DSP/EQ/pitch/A-B loop/sleep timer, library & queue browser, theme & extension switcher, beat-reactive effects, auto-mute MC music, and bidirectional game-reactive rules via the bundled [`minecraft-link`](extensions/minecraft-link) extension (`127.0.0.1:26262` TCP + Unix socket IPC). See [`minecraft-mod/README.md`](minecraft-mod/README.md).
 
 ---
 
@@ -87,7 +89,7 @@ environment.systemPackages = [ inputs.tntron.packages.${pkgs.system}.default ];
 
 ## Nightly Releases (Includes Pre-Bundled GIFs & Extensions)
 
-Every nightly build ships **ready to run** with `tntron`, `tntron-ctl`, all bundled extensions, desktop icons, `.desktop` launcher, and the full curated **bass-reactive GIF pack** (`gifs/`):
+Every nightly build ships **ready to run** with `tntron`, `tntron-ctl`, all bundled extensions, desktop icons, `.desktop` launcher, the curated **bass-reactive GIF pack** (`gifs/`), and the standalone **Minecraft Fabric 26.2 Mod JAR** (`tntron-fabric-26.2-*.jar`):
 
 1. Download **`tntron-nightly-linux-x86_64.tar.gz`** from the [Nightly Release Page](https://github.com/Arcioth/tntron/releases/tag/nightly) (or via `gh`):
    ```bash

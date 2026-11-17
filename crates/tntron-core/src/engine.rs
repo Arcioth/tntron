@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{error, info};
 
 use crate::audio::{run_mpv_actor, MpvActorEvent, MpvCommand, MpvEvent, MpvSupervisor};
@@ -22,7 +22,11 @@ use crate::hardware::{
     daeboard_start_sync, daeboard_stop_sync, daetron_reload_sync, daetron_start_sync,
     spawn_hardware_worker, HardwareCmd,
 };
-use crate::ipc::{default_cover_cache_path, run_ipc_server, write_status_file, TntronStatus};
+use crate::ipc::{
+    default_cover_cache_path, encode_base64, run_ipc_server, run_mc_tcp_server, write_status_file,
+    IpcExtensionItem, IpcLibraryData, IpcLibraryFolder, IpcLibraryTrack, IpcQueryKind, IpcResponse,
+    IpcThemeItem, McBridgeHandle, McTelemetry, TntronStatus, BUILTIN_THEME_ITEMS,
+};
 use crate::library::{
     analyze_track_blocking, copy_track_to_folder_in_jail, create_folder_in_jail,
     delete_file_in_jail, delete_folder_in_jail, load_companion_lrc, read_directory, rename_in_jail,
@@ -34,8 +38,9 @@ use crate::storage::{
     default_extensions_dir, default_popup_config_path, default_preferences_export_path,
     default_state_path, default_tnt_dir, export_full_tnt_bundle, format_tnt_share_json,
     import_full_tnt_bundle, parse_tnt_share_json, ButtonPackConfig, DiscordRpcConfig,
-    IconPackConfig, LayoutConfig, LogoConfig, PersistentState, PopupPlayerConfig, ProfileConfig,
-    ProfileTrackStat, ReactiveUiConfig, SpeedPreset, TrackSort, TransparencyConfig,
+    IconPackConfig, LayoutConfig, LogoConfig, MinecraftLinkConfig, PersistentState,
+    PopupPlayerConfig, ProfileConfig, ProfileTrackStat, ReactiveUiConfig, SpeedPreset, TrackSort,
+    TransparencyConfig,
 };
 
 #[derive(Debug, Clone)]
@@ -205,6 +210,15 @@ pub enum CoreCommand {
     RemoveFromQueue(usize),
     ClearQueue,
     DismissToast(u64),
+    IpcQuery {
+        req: IpcQueryKind,
+        reply: Arc<std::sync::Mutex<Option<oneshot::Sender<IpcResponse>>>>,
+    },
+    McTelemetry(McTelemetry),
+    McEvent {
+        event: String,
+        detail: Option<String>,
+    },
     Shutdown,
 }
 
@@ -338,6 +352,8 @@ pub struct CoreState {
     hw_tx: Option<mpsc::Sender<HardwareCmd>>,
     discord_tx: Option<mpsc::Sender<DiscordWorkerMsg>>,
     discord_status: Option<DiscordStatusHandle>,
+    pub mc_bridge: McBridgeHandle,
+    last_mc_ext_dispatch: Option<Instant>,
     pub error_banner: Option<String>,
     next_toast_id: u64,
     ext_tick_divider: u8,
@@ -368,6 +384,9 @@ impl CoreState {
             .map(|p| PersistentState::load_from(p))
             .unwrap_or_default();
         let ext_dir = extensions_dir.unwrap_or_else(default_extensions_dir);
+        let mc_bridge = McBridgeHandle::new(persisted.minecraft_link.clone());
+        let mut ext_host = ExtensionHost::new();
+        ext_host.set_mc_bridge(mc_bridge.clone());
 
         let mut state = Self {
             music_root: canonical_root.clone(),
@@ -394,7 +413,7 @@ impl CoreState {
             speed: persisted.speed.clamp(0.25, 3.0),
             loop_mode: LoopMode::All,
             shuffle_mode: ShuffleMode::Off,
-            ext_host: ExtensionHost::new(),
+            ext_host,
             ext_audio_filters: HashMap::new(),
             persisted,
             ab_loop: AbLoop::default(),
@@ -415,6 +434,8 @@ impl CoreState {
             hw_tx: None,
             discord_tx: None,
             discord_status: None,
+            mc_bridge,
+            last_mc_ext_dispatch: None,
             error_banner: None,
             next_toast_id: 1,
             ext_tick_divider: 0,
@@ -423,9 +444,6 @@ impl CoreState {
             dirty_persist: false,
         };
         state.migrate_legacy_listening_stats();
-        // Always boot into full visible UI even if an earlier session exited in Hide UI mode.
-        state.persisted.layout.hide_ui = false;
-        state.persisted.transparency.hide_ui = false;
 
         state.refresh_root_folders();
         state.refresh_all_tracks();
@@ -444,6 +462,9 @@ impl CoreState {
             state.apply_ext_commands(cmds, &mut boot_fx);
             state.reconcile_ext_owned_state();
         }
+        // Always boot into full visible UI even if an earlier session or extension storage saved hide_ui=true.
+        state.persisted.layout.hide_ui = false;
+        state.persisted.transparency.hide_ui = false;
         state
     }
 
@@ -1112,6 +1133,22 @@ impl CoreState {
                     self.persisted.dsp.spatial_hz = (orbit_hz as f32).clamp(0.05, 1.5);
                     self.apply_dsp_cmds(fx);
                 }
+                ExtHostCommand::AudioSetPreset { preset } => {
+                    let parsed = match preset.to_ascii_lowercase().as_str() {
+                        "flat" => Some(AudioPreset::Flat),
+                        "bass" | "bassboost" | "bass_boost" | "bass boost" => Some(AudioPreset::BassBoost),
+                        "vocal" => Some(AudioPreset::Vocal),
+                        "warm" => Some(AudioPreset::Warm),
+                        "rock" => Some(AudioPreset::Rock),
+                        "8d" | "spatial" | "spatial8d" | "8d spatial" => Some(AudioPreset::Spatial8D),
+                        _ => None,
+                    };
+                    if let Some(p) = parsed {
+                        self.persisted.dsp.apply_preset(p);
+                        self.apply_dsp_cmds(fx);
+                        self.dirty_persist = true;
+                    }
+                }
                 ExtHostCommand::AudioSetPitch {
                     pitch_st,
                     link_pitch,
@@ -1219,6 +1256,14 @@ impl CoreState {
                         Ok(msg) => self.push_toast(msg, false),
                         Err(err) => self.push_toast(err, true),
                     }
+                }
+                ExtHostCommand::McSetConfig { patch } => {
+                    apply_minecraft_link_patch(&mut self.persisted.minecraft_link, &patch);
+                    self.mc_bridge.update_config(self.persisted.minecraft_link.clone());
+                    self.dirty_persist = true;
+                }
+                ExtHostCommand::McSendNotice { kind, title, body } => {
+                    self.mc_bridge.push_notice(kind, title, body);
                 }
                 ExtHostCommand::RegisterSidebar { .. }
                 | ExtHostCommand::UnregisterSidebar { .. }
@@ -1383,6 +1428,10 @@ impl CoreState {
         if !has("tntron.popup-player") {
             self.persisted.popup_player.enabled = false;
             self.close_popup_terminal();
+        }
+        if !has("tntron.minecraft-link") {
+            self.persisted.minecraft_link.enabled = false;
+            self.mc_bridge.update_config(self.persisted.minecraft_link.clone());
         }
         if !has("openify.visualizer")
             && !has("openify.better-visualizer")
@@ -2850,6 +2899,56 @@ impl CoreState {
             CoreCommand::DismissToast(id) => {
                 self.toasts.retain(|t| t.id != id);
             }
+            CoreCommand::IpcQuery { req, reply } => {
+                let resp = self.handle_ipc_query(req);
+                if let Ok(mut g) = reply.lock() {
+                    if let Some(tx) = g.take() {
+                        let _ = tx.send(resp);
+                    }
+                }
+            }
+            CoreCommand::McTelemetry(telemetry) => {
+                let should_dispatch = self
+                    .last_mc_ext_dispatch
+                    .is_none_or(|t| t.elapsed() >= Duration::from_millis(450));
+                if should_dispatch {
+                    self.last_mc_ext_dispatch = Some(Instant::now());
+                    if let Ok(payload) = serde_json::to_value(&telemetry) {
+                        let pb = self.ext_playback_ctx();
+                        let lib = self.ext_library_ctx();
+                        let cmds = self.ext_host.dispatch_event_to_ext(
+                            "tntron.minecraft-link",
+                            "mcTelemetry",
+                            payload,
+                            &pb,
+                            &lib,
+                            &self.persisted.extension_storage,
+                        );
+                        if !cmds.is_empty() {
+                            self.apply_ext_commands(cmds, &mut fx);
+                        }
+                    }
+                }
+            }
+            CoreCommand::McEvent { event, detail } => {
+                let payload = serde_json::json!({
+                    "event": event,
+                    "detail": detail,
+                });
+                let pb = self.ext_playback_ctx();
+                let lib = self.ext_library_ctx();
+                let cmds = self.ext_host.dispatch_event_to_ext(
+                    "tntron.minecraft-link",
+                    "mcEvent",
+                    payload,
+                    &pb,
+                    &lib,
+                    &self.persisted.extension_storage,
+                );
+                if !cmds.is_empty() {
+                    self.apply_ext_commands(cmds, &mut fx);
+                }
+            }
             CoreCommand::Shutdown => {
                 self.mark_dirty_and_save();
                 fx.mpv_cmds.push(MpvCommand::Quit);
@@ -2860,6 +2959,155 @@ impl CoreState {
             self.mark_dirty_and_save();
         }
         fx
+    }
+
+    fn handle_ipc_query(&self, req: IpcQueryKind) -> IpcResponse {
+        match req {
+            IpcQueryKind::GetLibrary {
+                query,
+                folder,
+                limit,
+            } => {
+                let max_items = limit.unwrap_or(150).clamp(1, 500);
+                let q = query
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_ascii_lowercase);
+
+                let folders: Vec<IpcLibraryFolder> = self
+                    .folder_cards
+                    .iter()
+                    .map(|c| IpcLibraryFolder {
+                        name: c.name.clone(),
+                        path: c.path.display().to_string(),
+                        track_count: c.track_count,
+                    })
+                    .collect();
+
+                let folder_filter = folder
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .and_then(|f| resolve_in_jail(&self.music_root, Path::new(f)));
+
+                let mut matched: Vec<IpcLibraryTrack> = Vec::new();
+                for t in &self.all_library_tracks {
+                    if let Some(ref fdir) = folder_filter {
+                        if !t.path.starts_with(fdir) {
+                            continue;
+                        }
+                    }
+                    if let Some(ref needle) = q {
+                        let hay = format!(
+                            "{} {} {} {}",
+                            t.title.to_ascii_lowercase(),
+                            t.artist.to_ascii_lowercase(),
+                            t.album.to_ascii_lowercase(),
+                            t.path.display().to_string().to_ascii_lowercase()
+                        );
+                        if !hay.contains(needle) {
+                            continue;
+                        }
+                    }
+                    matched.push(IpcLibraryTrack {
+                        title: t.title.clone(),
+                        artist: t.artist.clone(),
+                        album: t.album.clone(),
+                        path: t.path.display().to_string(),
+                        duration: t.duration_sec,
+                        bpm: t.bpm,
+                        is_favorite: self.persisted.favorites.contains(&t.path),
+                    });
+                    if matched.len() >= max_items {
+                        break;
+                    }
+                }
+
+                IpcResponse {
+                    ok: true,
+                    error: None,
+                    status: Some(TntronStatus::from_state(self)),
+                    library: Some(IpcLibraryData {
+                        current_dir: self.current_dir.display().to_string(),
+                        folders,
+                        tracks: matched,
+                        total_tracks: self.all_library_tracks.len(),
+                    }),
+                    themes: None,
+                    extensions: None,
+                    cover_base64: None,
+                    message: None,
+                }
+            }
+            IpcQueryKind::GetThemes => {
+                let mut themes: Vec<IpcThemeItem> = BUILTIN_THEME_ITEMS
+                    .iter()
+                    .map(|(slug, label, accent)| IpcThemeItem {
+                        slug: (*slug).to_string(),
+                        label: (*label).to_string(),
+                        accent: (*accent).to_string(),
+                        is_extension: false,
+                    })
+                    .collect();
+                for et in &self.ext_host.themes {
+                    themes.push(IpcThemeItem {
+                        slug: et.slug.clone(),
+                        label: et.label.clone(),
+                        accent: et.accent.clone(),
+                        is_extension: true,
+                    });
+                }
+                IpcResponse {
+                    ok: true,
+                    error: None,
+                    status: Some(TntronStatus::from_state(self)),
+                    library: None,
+                    themes: Some(themes),
+                    extensions: None,
+                    cover_base64: None,
+                    message: None,
+                }
+            }
+            IpcQueryKind::GetExtensions => {
+                let extensions = self
+                    .ext_host
+                    .cards()
+                    .into_iter()
+                    .map(|c| IpcExtensionItem {
+                        id: c.id,
+                        name: c.name,
+                        version: c.version,
+                        description: c.description,
+                        enabled: c.enabled,
+                        error: c.error,
+                    })
+                    .collect();
+                IpcResponse {
+                    ok: true,
+                    error: None,
+                    status: Some(TntronStatus::from_state(self)),
+                    library: None,
+                    themes: None,
+                    extensions: Some(extensions),
+                    cover_base64: None,
+                    message: None,
+                }
+            }
+            IpcQueryKind::GetCover => {
+                let cover_base64 = self.cover_art.as_ref().map(|bytes| encode_base64(bytes));
+                IpcResponse {
+                    ok: true,
+                    error: None,
+                    status: None,
+                    library: None,
+                    themes: None,
+                    extensions: None,
+                    cover_base64,
+                    message: None,
+                }
+            }
+        }
     }
 
     /// Periodic tick check (200ms): A-B loop wraparound, Sleep timer, 1Hz extension tick, & toasts.
@@ -3376,6 +3624,25 @@ fn apply_discord_rpc_patch(cfg: &mut DiscordRpcConfig, patch: &serde_json::Value
                 dst.insert(k.clone(), v.clone());
             }
             if let Ok(updated) = serde_json::from_value::<DiscordRpcConfig>(base) {
+                *cfg = updated;
+            }
+        }
+    }
+}
+
+fn apply_minecraft_link_patch(cfg: &mut MinecraftLinkConfig, patch: &serde_json::Value) {
+    if let Ok(mut base) = serde_json::to_value(&*cfg) {
+        if let (Some(dst), Some(src)) = (base.as_object_mut(), patch.as_object()) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
+            if let Ok(mut updated) = serde_json::from_value::<MinecraftLinkConfig>(base) {
+                if updated.tcp_port < 1024 {
+                    updated.tcp_port = 26262;
+                }
+                if updated.tcp_host.trim().is_empty() {
+                    updated.tcp_host = "127.0.0.1".to_string();
+                }
                 *cfg = updated;
             }
         }
@@ -3909,17 +4176,28 @@ pub async fn run_core_runtime(
     let mut last_published_lyric = state.current_lyric_line();
 
     let bcast_clone = broadcast_tx.clone();
+    let cmd_tx_for_unix = cmd_tx_for_ipc.clone();
+    let status_watch_rx_unix = status_watch_rx.clone();
+    let mc_bridge_unix = state.mc_bridge.clone();
     tokio::spawn(async move {
-        if let Err(e) = run_ipc_server(cmd_tx_for_ipc, status_watch_rx, bcast_clone).await {
+        if let Err(e) = run_ipc_server(cmd_tx_for_unix, status_watch_rx_unix, bcast_clone, mc_bridge_unix).await {
             info!("IPC server stopped: {e}");
         }
+    });
+
+    let bcast_mc = broadcast_tx.clone();
+    let mc_bridge_tcp = state.mc_bridge.clone();
+    tokio::spawn(async move {
+        run_mc_tcp_server(cmd_tx_for_ipc, status_watch_rx, bcast_mc, mc_bridge_tcp).await;
     });
 
     let _ = ui_tx.send(CoreUpdate::Snapshot(Box::new(state.snapshot()))).await;
 
     let mut ui_tick = tokio::time::interval(Duration::from_millis(200));
+    let mut viz_tick = tokio::time::interval(Duration::from_millis(75));
     let mut sync_tick = tokio::time::interval(Duration::from_secs(5));
     ui_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    viz_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
@@ -4043,6 +4321,11 @@ pub async fn run_core_runtime(
                         sleep_remaining_sec: state.sleep_remaining_sec(),
                     });
                 }
+            }
+            _ = viz_tick.tick(), if broadcast_tx.receiver_count() > 0 && state.play_state == PlayState::Playing => {
+                let st = TntronStatus::from_state(&state);
+                let _ = status_watch_tx.send(st.clone());
+                let _ = broadcast_tx.send(st);
             }
             _ = sync_tick.tick() => {
                 let dc_now = state

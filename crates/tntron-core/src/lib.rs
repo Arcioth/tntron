@@ -23,13 +23,15 @@ pub use ext_api::{
 };
 pub use extensions::ExtensionHost;
 pub use ipc::{
-    default_socket_path, default_status_path, IpcCommand, IpcResponse, PopupTrackItem, TntronStatus,
+    default_socket_path, default_status_path, IpcCommand, IpcExtensionItem, IpcLibraryData,
+    IpcLibraryFolder, IpcLibraryTrack, IpcQueryKind, IpcResponse, IpcThemeItem, McBridgeHandle,
+    McNotice, McTelemetry, McTelemetrySnapshot, PopupTrackItem, TntronStatus,
 };
 pub use library::{format_mmss, BrowserEntry, Track, TrackAnalysis, TrackId};
 pub use storage::{
     default_extensions_dir, default_full_tnt_export_path, default_popup_config_path,
     default_state_path, default_tnt_dir, format_tnt_share_json, list_tnt_files,
     parse_tnt_share_json, ButtonPackConfig, DiscordRpcConfig, IconPackConfig, LayoutConfig,
-    LinuxDisplayEnv, LogoConfig, PersistentState, PopupPlayerConfig, ProfileConfig,
-    ProfileTrackStat, ReactiveUiConfig, SpeedPreset, TrackSort, TransparencyConfig,
+    LinuxDisplayEnv, LogoConfig, MinecraftLinkConfig, PersistentState, PopupPlayerConfig,
+    ProfileConfig, ProfileTrackStat, ReactiveUiConfig, SpeedPreset, TrackSort, TransparencyConfig,
 };
