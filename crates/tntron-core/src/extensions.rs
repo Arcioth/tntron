@@ -54,6 +54,7 @@ use crate::ext_api::{
     ExtSidebarTab, ExtSlotBadge, ExtensionCardInfo, ExtensionManifest, API_VERSION,
     VALID_PERMISSIONS,
 };
+use crate::ipc::McBridgeHandle;
 
 #[derive(Default)]
 struct LuaBridgeState {
@@ -63,6 +64,7 @@ struct LuaBridgeState {
     library: ExtLibraryCtx,
     storage: HashMap<String, serde_json::Value>,
     pending_cmds: Vec<ExtHostCommand>,
+    mc_bridge: Option<McBridgeHandle>,
 }
 
 impl LuaBridgeState {
@@ -102,6 +104,7 @@ pub struct ExtensionHost {
     pub player_widgets: Vec<ExtSlotBadge>,
     pub compact_menu: bool,
     compact_menu_owner: Option<String>,
+    mc_bridge: Option<McBridgeHandle>,
 }
 
 impl Default for ExtensionHost {
@@ -121,7 +124,12 @@ impl ExtensionHost {
             player_widgets: Vec::new(),
             compact_menu: false,
             compact_menu_owner: None,
+            mc_bridge: None,
         }
+    }
+
+    pub fn set_mc_bridge(&mut self, bridge: McBridgeHandle) {
+        self.mc_bridge = Some(bridge);
     }
 
     pub fn validate_manifest(m: &ExtensionManifest) -> Result<(), String> {
@@ -532,6 +540,7 @@ Place each extension in its own folder inside `~/.config/tntron/extensions/<ext-
             },
             storage: storage_map.get(id).cloned().unwrap_or_default(),
             pending_cmds: Vec::new(),
+            mc_bridge: self.mc_bridge.clone(),
         }));
 
         let lua = match create_sandboxed_lua(&self.exts[idx].script_src, &bridge) {
@@ -886,6 +895,7 @@ Place each extension in its own folder inside `~/.config/tntron/extensions/<ext-
                 ExtHostCommand::SetAudioFilter { .. }
                 | ExtHostCommand::ClearAudioFilter
                 | ExtHostCommand::AudioSetSpatial { .. }
+                | ExtHostCommand::AudioSetPreset { .. }
                     if perms.contains("audio:dsp") =>
                 {
                     runtime_out.push(cmd);
@@ -973,6 +983,12 @@ Place each extension in its own folder inside `~/.config/tntron/extensions/<ext-
                 | ExtHostCommand::HwDaetronStart
                 | ExtHostCommand::HwDaetronReload
                     if perms.contains("hw:control") =>
+                {
+                    runtime_out.push(cmd);
+                }
+                ExtHostCommand::McSetConfig { .. }
+                | ExtHostCommand::McSendNotice { .. }
+                    if perms.contains("mc:link") =>
                 {
                     runtime_out.push(cmd);
                 }
@@ -1556,7 +1572,101 @@ fn install_sdk(lua: &Lua, bridge: &SharedBridge) -> mlua::Result<()> {
             )?,
         )?;
     }
+    {
+        let br = Arc::clone(bridge);
+        audio.set(
+            "set_preset",
+            lua.create_function(move |_, preset: String| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                b.require_perm("audio:dsp")?;
+                b.pending_cmds.push(ExtHostCommand::AudioSetPreset { preset });
+                Ok(())
+            })?,
+        )?;
+    }
     root.set("audio", audio)?;
+
+    // tntron.mc (Minecraft Fabric 26.2 Link)
+    let mc = lua.create_table()?;
+    {
+        let br = Arc::clone(bridge);
+        mc.set(
+            "status",
+            lua.create_function(move |lua, ()| {
+                let maybe_handle = {
+                    let b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                    b.require_perm("mc:link")?;
+                    b.mc_bridge.clone()
+                };
+                if let Some(handle) = maybe_handle {
+                    let cfg = handle.config_snapshot();
+                    let snap = handle.telemetry_snapshot();
+                    let payload = serde_json::json!({
+                        "enabled": cfg.enabled,
+                        "tcp_enabled": cfg.tcp_enabled,
+                        "tcp_host": cfg.tcp_host,
+                        "tcp_port": cfg.tcp_port,
+                        "connected": snap.connected,
+                        "clients_count": snap.clients_count,
+                        "last_seen_epoch": snap.last_seen_epoch,
+                        "commands_received": snap.commands_received,
+                        "player_name": snap.telemetry.player_name,
+                        "dimension": snap.telemetry.dimension,
+                        "biome": snap.telemetry.biome,
+                        "health": snap.telemetry.health,
+                        "max_health": snap.telemetry.max_health,
+                        "in_combat": snap.telemetry.in_combat,
+                        "boss_active": snap.telemetry.boss_active,
+                        "boss_name": snap.telemetry.boss_name,
+                        "paused": snap.telemetry.paused,
+                        "in_world": snap.telemetry.in_world,
+                        "weather": snap.telemetry.weather,
+                        "underwater": snap.telemetry.underwater,
+                        "speed_bps": snap.telemetry.speed_bps,
+                        "tnt_nearby": snap.telemetry.tnt_nearby,
+                    });
+                    json_to_lua(lua, &payload)
+                } else {
+                    let payload = serde_json::json!({
+                        "enabled": false,
+                        "tcp_enabled": true,
+                        "tcp_host": "127.0.0.1",
+                        "tcp_port": 26262,
+                        "connected": false,
+                        "clients_count": 0,
+                        "commands_received": 0,
+                    });
+                    json_to_lua(lua, &payload)
+                }
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        mc.set(
+            "set_config",
+            lua.create_function(move |lua, spec: LuaValue| {
+                let patch: serde_json::Value = lua.from_value(spec)?;
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                b.require_perm("mc:link")?;
+                b.pending_cmds.push(ExtHostCommand::McSetConfig { patch });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        mc.set(
+            "send_notice",
+            lua.create_function(move |_, (kind, title, body): (String, String, String)| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                b.require_perm("mc:link")?;
+                b.pending_cmds.push(ExtHostCommand::McSendNotice { kind, title, body });
+                Ok(())
+            })?,
+        )?;
+    }
+    root.set("mc", mc)?;
 
     // tntron.hw (daeboard + daetron integration)
     let hw = lua.create_table()?;
@@ -3119,5 +3229,84 @@ end
         assert!(disabled_ui.contains(&"openify.better-ui".to_string()));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_minecraft_link_extension_telemetry_and_actions() {
+        let dir = std::env::temp_dir().join(format!(
+            "tntron_mc_link_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::bundled_extensions::seed_missing_into(&dir);
+
+        let bridge = McBridgeHandle::new(crate::storage::MinecraftLinkConfig::default());
+        let mut host = ExtensionHost::new();
+        host.set_mc_bridge(bridge.clone());
+        host.discover(&dir);
+
+        let pb = test_pb();
+        let lib = ExtLibraryCtx::default();
+        let storage: HashMap<String, HashMap<String, serde_json::Value>> = HashMap::new();
+
+        let load_cmds = host.enable("tntron.minecraft-link", &pb, &lib, &storage);
+        assert!(load_cmds.iter().any(|(_, c)| matches!(
+            c,
+            ExtHostCommand::McSetConfig { patch }
+                if patch.get("enabled").and_then(|v| v.as_bool()) == Some(true)
+        )));
+
+        let action_cmds = host.dispatch_action(
+            "tntron.minecraft-link",
+            "combat_boost",
+            serde_json::Value::Bool(true),
+            &pb,
+            &lib,
+            &storage,
+        );
+        assert!(action_cmds.iter().any(|(_, c)| matches!(
+            c,
+            ExtHostCommand::StorageSet { key, .. } if key == "mc_link_cfg"
+        )));
+
+        let ev_cmds = host.dispatch_event_to_ext(
+            "tntron.minecraft-link",
+            "mcTelemetry",
+            serde_json::json!({
+                "player_name": "Steve",
+                "dimension": "minecraft:the_nether",
+                "in_combat": true,
+                "boss_active": false,
+                "paused": false,
+                "in_world": true,
+                "underwater": false,
+                "tnt_nearby": false
+            }),
+            &pb,
+            &lib,
+            &storage,
+        );
+        assert!(ev_cmds.iter().any(|(_, c)| matches!(
+            c,
+            ExtHostCommand::AudioSetPreset { preset } if preset == "bass"
+        )));
+
+        let notice_cmds = host.dispatch_action(
+            "tntron.minecraft-link",
+            "test_toast",
+            serde_json::Value::Bool(true),
+            &pb,
+            &lib,
+            &storage,
+        );
+        assert!(notice_cmds.iter().any(|(_, c)| matches!(
+            c,
+            ExtHostCommand::McSendNotice { kind, .. } if kind == "toast"
+        )));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

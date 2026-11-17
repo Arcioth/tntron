@@ -127,6 +127,7 @@ Every Lua extension executes inside its own isolated `mlua` Lua 5.4 VM (`Lua::ne
 | `storage` | `tntron.storage.get(key, default)`, `tntron.storage.set(key, val)` | Namespaced atomic key-value JSON map inside `state.json` |
 | `notify` | `tntron.ui.toast(msg)`, `tntron.notify.desktop(summary, body)` | In-app toast banners and OS desktop notifications |
 | `network` | `tntron.net.fetch_rss()`, `yt_search()`, `yt_play()`, `yt_download()` (also requires `fs:write`) | Async HTTP/RSS/yt-dlp workers |
+| `mc:link` | `tntron.mc.status()`, `tntron.mc.set_config(patch)`, `tntron.mc.send_notice(kind, title, body)` | Localhost Minecraft Fabric 26.2 bridge & game telemetry |
 
 ---
 
@@ -209,6 +210,12 @@ Place your extension at `~/.config/tntron/extensions/<my-extension>/` (tntron au
 - `tntron.audio.set_filter(mpv_af_string)` — Assigns a sandboxed named DSP filter stage (for example `"equalizer=f=60:t=q:w=1.2:g=4"`). tntron composes active filter stages from multiple extensions safely without overwriting core DSP or other plugins.
 - `tntron.audio.clear_filter()` — Removes this extension's filter stage.
 - `tntron.audio.set_spatial(preset, width)` / `tntron.audio.set_pitch(semitones, preserve_formant)`
+- `tntron.audio.set_preset(preset)` — Apply a built-in DSP preset (`"flat"`, `"bass"`, `"vocal"`, `"warm"`, `"rock"`, `"8d"`)
+
+### `tntron.mc` (Minecraft Link)
+- `tntron.mc.status()` -> `{ enabled, tcp_enabled, tcp_host, tcp_port, connected, clients_count, player_name, dimension, biome, health, max_health, in_combat, boss_active, boss_name, paused, in_world, weather, underwater, speed_bps, tnt_nearby, commands_received }`
+- `tntron.mc.set_config(patch)` — Enable/configure the localhost TCP bridge (`{ enabled, tcp_enabled, tcp_host, tcp_port, auth_token }`)
+- `tntron.mc.send_notice(kind, title, body)` — Push a `"toast"`, `"actionbar"`, or `"chat"` notification to connected Minecraft clients
 
 ### `tntron.fs` (Jailed Inside Music Root)
 - `tntron.fs.create_folder(name)`
@@ -312,7 +319,7 @@ tntron.themes.register({
 | `on_unload(ctx)` | Extension disabled or before hot-reload |
 | `on_tick(ctx)` | Once per second (1 Hz) while active |
 | `on_action(ctx, action_id, val)` | User interacted with widget (`button`, `toggle`, `slider`, `input`) or clipboard paste completed |
-| `on_event(ctx, name, payload)` | `"trackChange"`, `"playbackStateChange"`, `"lyricsLoaded"`, `"rssFetched"`, `"ytSearch"`, `"ytPlaying"`, `"ytDownloaded"` |
+| `on_event(ctx, name, payload)` | `"trackChange"`, `"playbackStateChange"`, `"lyricsLoaded"`, `"rssFetched"`, `"ytSearch"`, `"ytPlaying"`, `"ytDownloaded"`, `"mcTelemetry"`, `"mcEvent"` |
 
 ### `.tnt` Share & Bundle Envelopes
 

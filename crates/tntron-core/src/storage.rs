@@ -573,6 +573,28 @@ impl PopupPlayerConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct MinecraftLinkConfig {
+    pub enabled: bool,
+    pub tcp_enabled: bool,
+    pub tcp_host: String,
+    pub tcp_port: u16,
+    pub auth_token: String,
+}
+
+impl Default for MinecraftLinkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tcp_enabled: true,
+            tcp_host: "127.0.0.1".to_string(),
+            tcp_port: 26262,
+            auth_token: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LogoConfig {
     pub enabled: bool,
     /// `"themed"` | `"monochrome"` | `"custom_color"` | `"custom_image"`
@@ -768,6 +790,7 @@ pub struct PersistentState {
     pub profile: ProfileConfig,
     pub transparency: TransparencyConfig,
     pub popup_player: PopupPlayerConfig,
+    pub minecraft_link: MinecraftLinkConfig,
     pub dsp: DspSettings,
     pub speed: f64,
     pub pitch_st: f64,
@@ -797,6 +820,7 @@ impl Default for PersistentState {
             profile: ProfileConfig::default(),
             transparency: TransparencyConfig::default(),
             popup_player: PopupPlayerConfig::default(),
+            minecraft_link: MinecraftLinkConfig::default(),
             dsp: DspSettings::default(),
             speed: 1.0,
             pitch_st: 0.0,

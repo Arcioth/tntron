@@ -97,4 +97,18 @@ if [ -n "$GIFS_SRC" ] && [ -d "$GIFS_SRC" ]; then
 fi
 
 echo "==> Built $TARBALL_GZ ($GIF_COUNT GIFs bundled)"
-ls -lh "$DIST_DIR"/${PKG_NAME}* "$DIST_DIR"/tntron-gifs-pack.tar.gz 2>/dev/null || true
+
+if [ -x "$ROOT_DIR/minecraft-mod/gradlew" ] && command -v java >/dev/null 2>&1; then
+  JAVA_MAJOR="$(java -version 2>&1 | sed -n 's/.*version "\([0-9]*\).*/\1/p' | head -n1)"
+  if [ -n "$JAVA_MAJOR" ] && [ "$JAVA_MAJOR" -ge 25 ] 2>/dev/null; then
+    echo "==> Building Fabric 26.2 Minecraft mod JAR..."
+    "$ROOT_DIR/minecraft-mod/gradlew" -p "$ROOT_DIR/minecraft-mod" build --no-daemon
+    MOD_JAR="$(find "$ROOT_DIR/minecraft-mod/build/libs" -maxdepth 1 -name 'tntron-fabric-*.jar' ! -name '*-sources.jar' | head -n1)"
+    if [ -n "$MOD_JAR" ]; then
+      cp "$MOD_JAR" "$DIST_DIR/"
+      (cd "$DIST_DIR" && sha256sum "$(basename "$MOD_JAR")" > "$(basename "$MOD_JAR").sha256")
+    fi
+  fi
+fi
+
+ls -lh "$DIST_DIR"/${PKG_NAME}* "$DIST_DIR"/tntron-gifs-pack.tar.gz "$DIST_DIR"/tntron-fabric-*.jar 2>/dev/null || true

@@ -1,0 +1,23 @@
+{
+  "id": "tntron.minecraft-link",
+  "name": "Minecraft Link (Fabric 26.2)",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Bridges tntron with the tntron Minecraft Fabric 26.2 mod over localhost TCP/Unix IPC with live in-game telemetry, track announcements, and game-reactive audio rules.",
+  "author": "tntron",
+  "main": "main.lua",
+  "permissions": [
+    "mc:link",
+    "playback:read",
+    "playback:control",
+    "audio:dsp",
+    "themes:register",
+    "ui:sidebar",
+    "ui:settings",
+    "ui:topbar",
+    "ui:player_widget",
+    "storage",
+    "notify"
+  ],
+  "requires": []
+}
