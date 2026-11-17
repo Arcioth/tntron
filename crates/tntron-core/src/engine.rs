@@ -423,9 +423,6 @@ impl CoreState {
             dirty_persist: false,
         };
         state.migrate_legacy_listening_stats();
-        // Always boot into full visible UI even if an earlier session exited in Hide UI mode.
-        state.persisted.layout.hide_ui = false;
-        state.persisted.transparency.hide_ui = false;
 
         state.refresh_root_folders();
         state.refresh_all_tracks();
@@ -444,6 +441,9 @@ impl CoreState {
             state.apply_ext_commands(cmds, &mut boot_fx);
             state.reconcile_ext_owned_state();
         }
+        // Always boot into full visible UI even if an earlier session or extension storage saved hide_ui=true.
+        state.persisted.layout.hide_ui = false;
+        state.persisted.transparency.hide_ui = false;
         state
     }
 

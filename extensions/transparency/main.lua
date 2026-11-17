@@ -187,6 +187,7 @@ end
 
 function on_load(_ctx)
     st.cfg = copy_cfg(tntron.storage.get("transparency_cfg", nil))
+    st.cfg.hide_ui = false
     st.show_topbar_btn = tntron.storage.get("show_topbar_btn", true)
     st.tint_draft = st.cfg.tint_hex or ""
     st.tint2_draft = st.cfg.tint2_hex or "#1b1035"
