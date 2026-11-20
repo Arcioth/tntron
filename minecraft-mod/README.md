@@ -18,7 +18,7 @@ Full in-game controller, audio-reactive HUD visualizer, synced karaoke lyrics ov
   - `/tntron vol <0..100>`, `/tntron seek <sec>`, `/tntron speed <0.25..3.0>`, `/tntron pitch <-12..12>`
   - `/tntron dsp <flat|bass|vocal|warm|rock|8d>`, `/tntron spatial`, `/tntron ab <mark_a|mark_b|clear|save|load>`
   - `/tntron sleep <minutes|off>`, `/tntron theme <slug>`, `/tntron search <query>`, `/tntron status`
-  - `/tntron hud`, `/tntron lyrics`, `/tntron reactive`, `/tntron reconnect`
+  - `/tntron hud`, `/tntron lyrics [original|translated|both]`, `/tntron translate [lang]`, `/tntron reactive`, `/tntron reconnect`
 - **Bidirectional `minecraft-link` Extension**:
   - Enable **Minecraft Link (Fabric 26.2)** inside tntron (**Extensions -> Minecraft Link**) to start the localhost TCP bridge (`127.0.0.1:26262`, optional auth token) and unlock game-reactive rules (auto-pause/duck on MC pause, combat/boss/TNT boost, underwater low-pass filter, dimension DSP & themes, and in-game track announcements).
 

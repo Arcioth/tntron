@@ -186,12 +186,47 @@ public final class TntronCommands {
                     ctx.getSource().sendFeedback(msg("HUD Overlay: " + (config.hudEnabled ? "ON" : "OFF")));
                     return 1;
                 }))
-                .then(ClientCommands.literal("lyrics").executes(ctx -> {
-                    config.lyricsOverlayEnabled = !config.lyricsOverlayEnabled;
-                    config.save();
-                    ctx.getSource().sendFeedback(msg("Synced Lyrics Overlay: " + (config.lyricsOverlayEnabled ? "ON" : "OFF")));
-                    return 1;
-                }))
+                .then(ClientCommands.literal("lyrics")
+                        .executes(ctx -> {
+                            config.lyricsOverlayEnabled = !config.lyricsOverlayEnabled;
+                            config.save();
+                            ctx.getSource().sendFeedback(msg("Synced Lyrics Overlay: " + (config.lyricsOverlayEnabled ? "ON" : "OFF")
+                                    + " (" + config.lyricsDisplayLabel() + ")"));
+                            return 1;
+                        })
+                        .then(ClientCommands.literal("original").executes(ctx -> {
+                            config.lyricsDisplayMode = "original";
+                            config.save();
+                            ctx.getSource().sendFeedback(msg("Lyrics display mode: Original only"));
+                            return 1;
+                        }))
+                        .then(ClientCommands.literal("translated").executes(ctx -> {
+                            config.lyricsDisplayMode = "translated";
+                            config.save();
+                            ctx.getSource().sendFeedback(msg("Lyrics display mode: Translated only"));
+                            return 1;
+                        }))
+                        .then(ClientCommands.literal("both").executes(ctx -> {
+                            config.lyricsDisplayMode = "both";
+                            config.save();
+                            ctx.getSource().sendFeedback(msg("Lyrics display mode: Both (Original + Translated)"));
+                            return 1;
+                        })))
+                .then(ClientCommands.literal("translate")
+                        .executes(ctx -> {
+                            client.translateLyrics(config.lyricsTranslateLang);
+                            ctx.getSource().sendFeedback(msg("Translating lyrics to " + config.lyricsTranslateLang.toUpperCase() + "..."));
+                            return 1;
+                        })
+                        .then(ClientCommands.argument("lang", StringArgumentType.word())
+                                .executes(ctx -> {
+                                    String lang = StringArgumentType.getString(ctx, "lang").trim().toLowerCase();
+                                    config.lyricsTranslateLang = lang;
+                                    config.save();
+                                    client.translateLyrics(lang);
+                                    ctx.getSource().sendFeedback(msg("Translating lyrics to " + lang.toUpperCase() + "..."));
+                                    return 1;
+                                })))
                 .then(ClientCommands.literal("reactive").executes(ctx -> {
                     config.reactiveEnabled = !config.reactiveEnabled;
                     config.save();

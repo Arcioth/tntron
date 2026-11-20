@@ -519,7 +519,17 @@ public final class TntronDashboardScreen extends Screen {
                 config.lyricsOverlayEnabled = !config.lyricsOverlayEnabled;
                 config.save();
                 rebuildWidgets();
-            }).bounds(leftX, y + 72, colW, 20).build());
+            }).bounds(leftX, y + 72, colW / 2 - 2, 20).build());
+
+            addRenderableWidget(Button.builder(Component.literal("Lyrics: " + config.lyricsDisplayLabel()), b -> {
+                config.lyricsDisplayMode = switch (config.lyricsDisplayMode) {
+                    case "original" -> "translated";
+                    case "translated" -> "both";
+                    default -> "original";
+                };
+                config.save();
+                rebuildWidgets();
+            }).bounds(leftX + colW / 2 + 2, y + 72, colW / 2 - 2, 20).build());
 
             addRenderableWidget(Button.builder(Component.literal("Beat Vignette: " + (config.beatVignette ? "ON" : "OFF")), b -> {
                 config.beatVignette = !config.beatVignette;
@@ -609,6 +619,25 @@ public final class TntronDashboardScreen extends Screen {
                 }
                 rebuildWidgets();
             }).bounds(rx + colW - 72, y + 120, 72, 20).build());
+
+            addRenderableWidget(Button.builder(Component.literal("Tr Lang: " + config.lyricsTranslateLang.toUpperCase()), b -> {
+                config.lyricsTranslateLang = switch (config.lyricsTranslateLang) {
+                    case "en" -> "tr";
+                    case "tr" -> "es";
+                    case "es" -> "fr";
+                    case "fr" -> "de";
+                    case "de" -> "ja";
+                    case "ja" -> "ko";
+                    case "ko" -> "ru";
+                    default -> "en";
+                };
+                config.save();
+                rebuildWidgets();
+            }).bounds(rx, y + 144, colW / 2 - 2, 20).build());
+
+            addRenderableWidget(Button.builder(Component.literal("Translate Now"), b -> {
+                client.translateLyrics(config.lyricsTranslateLang);
+            }).bounds(rx + colW / 2 + 2, y + 144, colW / 2 - 2, 20).build());
         }
     }
 
@@ -771,18 +800,68 @@ public final class TntronDashboardScreen extends Screen {
 
         int lyrX = panelX + 24 + specW;
         g.fill(lyrX, botY, lyrX + specW, botY + botH, 0xAA080A0F);
-        g.text(this.font, "Synced Lyrics", lyrX + 8, botY + 6, 0xFF94A3B8, false);
+        String mode = config.lyricsDisplayMode == null ? "both" : config.lyricsDisplayMode;
+        String langTag = (st.lyrics_target_lang != null && !st.lyrics_target_lang.isBlank())
+                ? (" · " + st.lyrics_target_lang.toUpperCase())
+                : "";
+        g.text(this.font, "Synced Lyrics [" + config.lyricsDisplayLabel() + langTag + "]", lyrX + 8, botY + 6, 0xFF94A3B8, false);
+
+        int transColorCurr = TntronThemeColors.blendRgb(accent, 0xFFFFFFFF, 0.50f);
+        int transColorIdle = TntronThemeColors.blendRgb(accent, 0xFF94A3B8, 0.72f);
+
         if (st.lyrics_window != null && !st.lyrics_window.isEmpty()) {
             int ly = botY + 22;
-            for (String line : st.lyrics_window) {
+            for (int i = 0; i < st.lyrics_window.size(); i++) {
                 if (ly + 11 > botY + botH - 4) break;
-                boolean isCurr = st.lyric != null && st.lyric.equals(line);
-                String draw = font.plainSubstrByWidth(line, specW - 16);
-                g.text(this.font, draw, lyrX + 8, ly, isCurr ? accent : 0xFFCBD5E1, isCurr);
-                ly += 13;
+                String origRaw = st.lyrics_window.get(i);
+                String origClean = origRaw == null ? "" : origRaw.trim();
+                boolean isCurr = (origRaw != null && origRaw.startsWith("> "))
+                        || (st.lyric != null && !st.lyric.isEmpty() && st.lyric.trim().equals(origClean));
+                String trRaw = (st.lyrics_window_translated != null && i < st.lyrics_window_translated.size())
+                        ? st.lyrics_window_translated.get(i)
+                        : "";
+                String trClean = trRaw == null ? "" : trRaw.trim();
+                if (trClean.startsWith("> ")) trClean = trClean.substring(2).trim();
+                String origNoPrefix = origClean.startsWith("> ") ? origClean.substring(2).trim() : origClean;
+
+                if ("original".equals(mode)) {
+                    String draw = font.plainSubstrByWidth(origRaw == null ? "" : origRaw, specW - 16);
+                    g.text(this.font, draw, lyrX + 8, ly, isCurr ? accent : 0xFFCBD5E1, isCurr);
+                    ly += 13;
+                } else if ("translated".equals(mode)) {
+                    String chosen = !trRaw.isEmpty() ? trRaw : (origRaw == null ? "" : origRaw);
+                    String draw = font.plainSubstrByWidth(chosen, specW - 16);
+                    int col = isCurr ? transColorCurr : (!trRaw.isEmpty() ? 0xFFCBD5E1 : 0xFF94A3B8);
+                    g.text(this.font, draw, lyrX + 8, ly, col, isCurr);
+                    ly += 13;
+                } else {
+                    String drawOrig = font.plainSubstrByWidth(origRaw == null ? "" : origRaw, specW - 16);
+                    g.text(this.font, drawOrig, lyrX + 8, ly, isCurr ? accent : 0xFFCBD5E1, isCurr);
+                    ly += 11;
+                    if (!trClean.isEmpty() && !trClean.equalsIgnoreCase(origNoPrefix) && ly + 10 <= botY + botH - 4) {
+                        String drawTr = font.plainSubstrByWidth("  " + trClean, specW - 18);
+                        g.text(this.font, drawTr, lyrX + 10, ly, isCurr ? transColorCurr : transColorIdle, false);
+                        ly += 11;
+                    } else {
+                        ly += 2;
+                    }
+                }
             }
-        } else if (st.lyric != null && !st.lyric.isEmpty()) {
-            g.text(this.font, font.plainSubstrByWidth(st.lyric, specW - 16), lyrX + 8, botY + 26, accent, true);
+        } else if ((st.lyric != null && !st.lyric.isEmpty()) || (st.lyric_translated != null && !st.lyric_translated.isEmpty())) {
+            String orig = st.lyric == null ? "" : st.lyric.trim();
+            String trans = st.lyric_translated == null ? "" : st.lyric_translated.trim();
+            if ("original".equals(mode)) {
+                g.text(this.font, font.plainSubstrByWidth(orig, specW - 16), lyrX + 8, botY + 26, accent, true);
+            } else if ("translated".equals(mode)) {
+                String chosen = !trans.isEmpty() ? trans : orig;
+                g.text(this.font, font.plainSubstrByWidth(chosen, specW - 16), lyrX + 8, botY + 26, transColorCurr, true);
+            } else {
+                String primary = !orig.isEmpty() ? orig : trans;
+                g.text(this.font, font.plainSubstrByWidth(primary, specW - 16), lyrX + 8, botY + 24, accent, true);
+                if (!orig.isEmpty() && !trans.isEmpty() && !orig.equalsIgnoreCase(trans)) {
+                    g.text(this.font, font.plainSubstrByWidth(trans, specW - 16), lyrX + 8, botY + 37, transColorCurr, false);
+                }
+            }
         } else {
             g.text(this.font, "No synced lyrics for current track", lyrX + 8, botY + 26, 0xFF64748B, false);
         }

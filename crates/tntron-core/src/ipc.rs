@@ -283,7 +283,13 @@ pub struct TntronStatus {
     pub beat: f32,
     pub lyric: String,
     #[serde(default)]
+    pub lyric_translated: String,
+    #[serde(default)]
     pub lyrics_window: Vec<String>,
+    #[serde(default)]
+    pub lyrics_window_translated: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lyrics_target_lang: Option<String>,
     #[serde(default)]
     pub playlist_items: Vec<PopupTrackItem>,
     #[serde(default)]
@@ -403,12 +409,15 @@ impl TntronStatus {
             .filter(|p| p.is_file())
             .map(|p| p.display().to_string());
         let lyrics_window = state.current_lyrics_window();
+        let lyrics_window_translated = state.current_lyrics_window_translated();
         let percentage = if dur > 0.0 {
             ((pos / dur) * 100.0).clamp(0.0, 100.0) as u8
         } else {
             0
         };
         let lyric = state.current_lyric_line().unwrap_or_default();
+        let lyric_translated = state.current_lyric_translated().unwrap_or_default();
+        let lyrics_target_lang = state.active_lyrics_lang.clone();
         let bpm = state.current_track_bpm();
         let base_label = if state.current_track.is_some() {
             if artist.is_empty() || artist == "Unknown Artist" {
@@ -492,7 +501,10 @@ impl TntronStatus {
             bands,
             beat,
             lyric,
+            lyric_translated,
             lyrics_window,
+            lyrics_window_translated,
+            lyrics_target_lang,
             playlist_items,
             queue_items,
             loop_mode: state.loop_mode.label().into(),
@@ -624,6 +636,7 @@ pub enum IpcCommand {
         event: String,
         detail: Option<String>,
     },
+    TranslateLyrics { lang: String },
     Status,
     Subscribe,
 }
@@ -1161,6 +1174,7 @@ fn translate_ipc_command(req: IpcCommand, current_track_path: &str) -> Vec<CoreC
             action_id,
             value: value.unwrap_or(serde_json::Value::Bool(true)),
         }],
+        IpcCommand::TranslateLyrics { lang } => vec![CoreCommand::TranslateLyrics(lang)],
         _ => Vec::new(),
     }
 }

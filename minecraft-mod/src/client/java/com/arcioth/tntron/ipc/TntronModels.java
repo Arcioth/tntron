@@ -38,7 +38,10 @@ public final class TntronModels {
         public float[] bands = new float[16];
         public float beat = 0.0f;
         public String lyric = "";
+        public String lyric_translated = "";
         public List<String> lyrics_window = Collections.emptyList();
+        public List<String> lyrics_window_translated = Collections.emptyList();
+        public String lyrics_target_lang;
         public List<PopupTrackItem> playlist_items = Collections.emptyList();
         public List<PopupTrackItem> queue_items = Collections.emptyList();
         public String loop_mode = "All";

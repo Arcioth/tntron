@@ -39,6 +39,7 @@ pub const BUNDLED_EXTENSIONS: &[BundledExtension] = &[
     ext!("listening-stats"),
     ext!("lyrics"),
     ext!("minecraft-link"),
+    ext!("neat-facts"),
     ext!("neon-theme-pack"),
     ext!("now-playing-notify"),
     ext!("playlists"),

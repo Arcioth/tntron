@@ -84,7 +84,9 @@ public final class TntronHudOverlay implements HudElement {
         int screenH = graphics.guiHeight();
 
         // Karaoke synced lyrics bar above hotbar
-        if (config.lyricsOverlayEnabled && st.isPlaying() && st.lyric != null && !st.lyric.isBlank()) {
+        boolean hasAnyLyric = (st.lyric != null && !st.lyric.isBlank())
+                || (st.lyric_translated != null && !st.lyric_translated.isBlank());
+        if (config.lyricsOverlayEnabled && st.isPlaying() && hasAnyLyric) {
             renderLyricsBar(graphics, font, screenW, screenH, st, accent);
         }
 
@@ -112,20 +114,53 @@ public final class TntronHudOverlay implements HudElement {
     }
 
     private void renderLyricsBar(GuiGraphicsExtractor g, Font font, int screenW, int screenH, TntronStatus st, int accent) {
-        String line = st.lyric.trim();
+        String orig = st.lyric == null ? "" : st.lyric.trim();
+        String trans = st.lyric_translated == null ? "" : st.lyric_translated.trim();
+        String mode = config.lyricsDisplayMode == null ? "both" : config.lyricsDisplayMode;
+
+        String topLine;
+        String subLine = "";
+        if ("original".equals(mode)) {
+            topLine = orig;
+        } else if ("translated".equals(mode)) {
+            topLine = !trans.isEmpty() ? trans : orig;
+        } else {
+            // "both": original on top, translated underneath when distinct
+            topLine = !orig.isEmpty() ? orig : trans;
+            if (!orig.isEmpty() && !trans.isEmpty() && !orig.equalsIgnoreCase(trans)) {
+                subLine = trans;
+            }
+        }
+        if (topLine.isEmpty()) {
+            return;
+        }
+
         int maxW = Math.min(340, screenW - 40);
-        String trimmed = font.plainSubstrByWidth(line, maxW - 16);
-        int textW = font.width(trimmed);
+        String topTrim = font.plainSubstrByWidth(topLine, maxW - 18);
+        String subTrim = subLine.isEmpty() ? "" : font.plainSubstrByWidth(subLine, maxW - 18);
+        int textW = Math.max(font.width(topTrim), subTrim.isEmpty() ? 0 : font.width(subTrim));
         int boxW = textW + 18;
+        int boxH = subTrim.isEmpty() ? 15 : 26;
         int boxX = (screenW - boxW) / 2;
-        int boxY = screenH - config.lyricsYOffset;
+        int boxY = screenH - config.lyricsYOffset - (subTrim.isEmpty() ? 0 : 11);
 
         int bg = TntronThemeColors.withAlpha(0x0D0F14, config.hudOpacity * 0.85f);
         int border = TntronThemeColors.withAlpha(accent, 0.55f);
-        g.fill(boxX, boxY, boxX + boxW, boxY + 15, bg);
-        g.fill(boxX, boxY, boxX + 2, boxY + 15, accent);
+        g.fill(boxX, boxY, boxX + boxW, boxY + boxH, bg);
+        g.fill(boxX, boxY, boxX + 2, boxY + boxH, accent);
         g.fill(boxX, boxY, boxX + boxW, boxY + 1, border);
-        g.text(font, trimmed, boxX + 9, boxY + 3, 0xFFF8FAFC, true);
+
+        int topX = boxX + (boxW - font.width(topTrim)) / 2;
+        int topColor = ("translated".equals(mode) && !trans.isEmpty())
+                ? TntronThemeColors.blendRgb(accent, 0xFFFFFFFF, 0.65f)
+                : 0xFFF8FAFC;
+        g.text(font, topTrim, topX, boxY + 3, topColor, true);
+
+        if (!subTrim.isEmpty()) {
+            int subX = boxX + (boxW - font.width(subTrim)) / 2;
+            int subColor = TntronThemeColors.blendRgb(accent, 0xFFFFFFFF, 0.55f);
+            g.text(font, subTrim, subX, boxY + 14, subColor, true);
+        }
     }
 
     private void renderNowPlayingCard(GuiGraphicsExtractor g, Font font, int screenW, int screenH, TntronStatus st, int accent) {

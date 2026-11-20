@@ -516,6 +516,13 @@ public final class TntronClient {
         sendJsonAsync(o, null);
     }
 
+    public void translateLyrics(String lang) {
+        JsonObject o = new JsonObject();
+        o.addProperty("cmd", "translate_lyrics");
+        o.addProperty("lang", (lang == null || lang.isBlank()) ? "en" : lang.trim().toLowerCase());
+        sendJsonAsync(o, null);
+    }
+
     public void queryLibrary(String query, String folder, int limit, Consumer<LibraryData> callback) {
         JsonObject o = new JsonObject();
         o.addProperty("cmd", "get_library");

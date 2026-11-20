@@ -2680,6 +2680,8 @@ mod tests {
             channels: Some(2),
             beat_pulse: 0.5,
             bands: vec![0.4; 16],
+            lifetime_listen_sec: 9548,
+            lifetime_plays: 42,
         }
     }
 
@@ -2855,6 +2857,8 @@ end
             channels: None,
             beat_pulse: 0.0,
             bands: vec![0.0; 16],
+            lifetime_listen_sec: 0,
+            lifetime_plays: 0,
         };
         let pb = test_pb();
         let lib = ExtLibraryCtx {
@@ -3066,6 +3070,27 @@ end
             c,
             ExtHostCommand::UiSetIconConfig { patch }
                 if patch.get("pack").and_then(|v| v.as_str()) == Some("material")
+        )));
+
+        let _ = host.dispatch_action(
+            "tunotron.neat-facts",
+            "cat:stats",
+            serde_json::Value::Bool(true),
+            &pb,
+            &lib,
+            &storage,
+        );
+        let facts_cmds = host.dispatch_action(
+            "tunotron.neat-facts",
+            "toast_now",
+            serde_json::Value::Bool(true),
+            &pb,
+            &lib,
+            &storage,
+        );
+        assert!(facts_cmds.iter().any(|(_, c)| matches!(
+            c,
+            ExtHostCommand::Toast { message, .. } if message.contains("2,984 MB")
         )));
 
         let trans_cmds = host.dispatch_action(

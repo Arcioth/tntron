@@ -489,6 +489,8 @@ pub struct ExtPlaybackCtx {
     pub channels: Option<u8>,
     pub beat_pulse: f32,
     pub bands: Vec<f32>,
+    pub lifetime_listen_sec: u64,
+    pub lifetime_plays: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]

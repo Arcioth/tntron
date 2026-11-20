@@ -222,6 +222,7 @@ pub enum CoreCommand {
         event: String,
         detail: Option<String>,
     },
+    TranslateLyrics(String),
     Shutdown,
 }
 
@@ -349,6 +350,9 @@ pub struct CoreState {
     pub mpv_channels: Option<u64>,
     pub active_analysis: Option<Arc<TrackAnalysis>>,
     pub active_lyrics: Vec<LyricLine>,
+    pub active_lyrics_translated: Vec<String>,
+    pub active_lyrics_lang: Option<String>,
+    pending_translate_lang: Option<String>,
     pub manual_bpms: HashMap<PathBuf, f64>,
     pub cover_cache_path: Option<PathBuf>,
     popup_child: Option<std::process::Child>,
@@ -431,6 +435,9 @@ impl CoreState {
             mpv_channels: None,
             active_analysis: None,
             active_lyrics: Vec::new(),
+            active_lyrics_translated: Vec::new(),
+            active_lyrics_lang: None,
+            pending_translate_lang: None,
             manual_bpms: HashMap::new(),
             cover_cache_path: None,
             popup_child: None,
@@ -498,15 +505,31 @@ impl CoreState {
             .map(|d| d.saturating_duration_since(Instant::now()).as_secs())
     }
 
-    pub fn current_lyric_line(&self) -> Option<String> {
+    fn current_lyric_index(&self) -> Option<usize> {
         if self.active_lyrics.is_empty() {
             return None;
         }
         let pos = self.clock.now() + 0.15;
         self.active_lyrics
             .iter()
-            .rfind(|l| l.time_sec <= pos && !l.text.trim().is_empty())
-            .map(|l| l.text.trim().to_string())
+            .rposition(|l| l.time_sec <= pos && !l.text.trim().is_empty())
+    }
+
+    pub fn current_lyric_line(&self) -> Option<String> {
+        let idx = self.current_lyric_index()?;
+        Some(self.active_lyrics[idx].text.trim().to_string())
+    }
+
+    pub fn current_lyric_translated(&self) -> Option<String> {
+        if self.active_lyrics_translated.is_empty() {
+            return None;
+        }
+        let idx = self.current_lyric_index()?;
+        self.active_lyrics_translated
+            .get(idx)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
     }
 
     pub fn current_lyrics_window(&self) -> Vec<String> {
@@ -514,11 +537,7 @@ impl CoreState {
             return Vec::new();
         }
         let pos = self.clock.now() + 0.15;
-        let idx = self
-            .active_lyrics
-            .iter()
-            .rposition(|l| l.time_sec <= pos && !l.text.trim().is_empty())
-            .unwrap_or(0);
+        let idx = self.current_lyric_index().unwrap_or(0);
         let start = idx.saturating_sub(1);
         let end = (idx + 4).min(self.active_lyrics.len());
         self.active_lyrics[start..end]
@@ -532,6 +551,38 @@ impl CoreState {
                     Some(format!("> {t}"))
                 } else {
                     Some(format!("  {t}"))
+                }
+            })
+            .collect()
+    }
+
+    pub fn current_lyrics_window_translated(&self) -> Vec<String> {
+        if self.active_lyrics.is_empty() || self.active_lyrics_translated.is_empty() {
+            return Vec::new();
+        }
+        let pos = self.clock.now() + 0.15;
+        let idx = self.current_lyric_index().unwrap_or(0);
+        let start = idx.saturating_sub(1);
+        let end = (idx + 4).min(self.active_lyrics.len());
+        self.active_lyrics[start..end]
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, l)| {
+                if l.text.trim().is_empty() {
+                    return None;
+                }
+                let abs = start + offset;
+                let tr = self
+                    .active_lyrics_translated
+                    .get(abs)
+                    .map(|s| s.trim())
+                    .unwrap_or("");
+                if tr.is_empty() {
+                    Some(String::new())
+                } else if abs == idx && l.time_sec <= pos {
+                    Some(format!("> {tr}"))
+                } else {
+                    Some(format!("  {tr}"))
                 }
             })
             .collect()
@@ -625,6 +676,8 @@ impl CoreState {
                 .or_else(|| self.current_track.as_ref().and_then(|t| t.channels)),
             beat_pulse,
             bands,
+            lifetime_listen_sec: self.persisted.profile.stats_total_sec,
+            lifetime_plays: self.persisted.profile.stats_total_plays,
         }
     }
 
@@ -836,6 +889,46 @@ impl CoreState {
                         .collect();
                     if !parsed.is_empty() {
                         self.active_lyrics = parsed;
+                        self.active_lyrics_translated.clear();
+                        self.active_lyrics_lang = None;
+                        if let (Some(lang), Some(cur)) =
+                            (self.pending_translate_lang.take(), self.current_track.as_ref())
+                        {
+                            let lines: Vec<String> =
+                                self.active_lyrics.iter().map(|l| l.text.clone()).collect();
+                            fx.ext_jobs.push((
+                                "core.mc-translate".into(),
+                                AsyncExtJob::LyricsTranslate {
+                                    path: cur.path.display().to_string(),
+                                    target_lang: lang,
+                                    lines,
+                                },
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if res.event_name == "lyricsTranslated" {
+            let matches_current = self.current_track.as_ref().is_some_and(|cur| {
+                res.payload
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|p| Path::new(p) == cur.path)
+            });
+            if matches_current {
+                if let Some(arr) = res.payload.get("translations").and_then(|v| v.as_array()) {
+                    let lines: Vec<String> = arr
+                        .iter()
+                        .map(|v| v.as_str().unwrap_or("").trim().to_string())
+                        .collect();
+                    if lines.iter().any(|l| !l.is_empty()) {
+                        self.active_lyrics_translated = lines;
+                        self.active_lyrics_lang = res
+                            .payload
+                            .get("target_lang")
+                            .and_then(|v| v.as_str())
+                            .map(ToString::to_string);
                     }
                 }
             }
@@ -2032,6 +2125,9 @@ impl CoreState {
         self.cover_art = None;
         self.active_analysis = None;
         self.active_lyrics = load_companion_lrc(&track.path);
+        self.active_lyrics_translated.clear();
+        self.active_lyrics_lang = None;
+        self.pending_translate_lang = None;
         self.ab_loop.clear();
         self.play_state = PlayState::Playing;
         self.clock.sync(0.0);
@@ -2967,6 +3063,40 @@ impl CoreState {
                 );
                 if !cmds.is_empty() {
                     self.apply_ext_commands(cmds, &mut fx);
+                }
+            }
+            CoreCommand::TranslateLyrics(lang) => {
+                let target_lang = lang.trim().to_ascii_lowercase();
+                let target_lang = if target_lang.is_empty() {
+                    "en".to_string()
+                } else {
+                    target_lang
+                };
+                if let Some(cur) = &self.current_track {
+                    if !self.active_lyrics.is_empty() {
+                        let lines: Vec<String> =
+                            self.active_lyrics.iter().map(|l| l.text.clone()).collect();
+                        fx.ext_jobs.push((
+                            "core.mc-translate".into(),
+                            AsyncExtJob::LyricsTranslate {
+                                path: cur.path.display().to_string(),
+                                target_lang,
+                                lines,
+                            },
+                        ));
+                    } else {
+                        self.pending_translate_lang = Some(target_lang);
+                        fx.ext_jobs.push((
+                            "core.mc-translate".into(),
+                            AsyncExtJob::LyricsLoad {
+                                path: cur.path.clone(),
+                                title: cur.title.clone(),
+                                artist: cur.artist.clone(),
+                                duration_sec: self.duration_sec.max(cur.duration_sec),
+                                provider: Some("auto".into()),
+                            },
+                        ));
+                    }
                 }
             }
             CoreCommand::Shutdown => {
@@ -4991,6 +5121,77 @@ mod tests {
         });
         assert!(fx_yt.stream_analysis_target.is_some());
         assert!(fx_yt.track_asset_target.is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_translated_lyrics_sync_and_ipc_status() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tntron_tr_lyrics_{unique}"));
+        let music = root.join("music");
+        let ext_dir = root.join("exts");
+        std::fs::create_dir_all(&music).unwrap();
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        let track_path = music.join("song.mp3");
+        std::fs::write(&track_path, b"dummy").unwrap();
+
+        let mut s = CoreState::with_paths(music, None, Some(ext_dir));
+        let mut tr = Track::new(track_path.clone());
+        tr.title = "Yoru ni Kakeru".into();
+        tr.artist = "YOASOBI".into();
+        s.start_track(Arc::new(tr), Some(0));
+
+        // Load synced lyrics
+        s.handle_ext_async_result(ExtAsyncResult {
+            ext_id: "openify.better-lyrics".into(),
+            event_name: "lyricsLoaded".into(),
+            payload: serde_json::json!({
+                "path": track_path.display().to_string(),
+                "source": "LRCLIB",
+                "lines": [
+                    { "time_sec": 0.0, "text": "Shizumu you ni" },
+                    { "time_sec": 5.0, "text": "Tokete yuku you ni" }
+                ]
+            }),
+            stream_play: None,
+            rescan_after: false,
+        });
+        assert_eq!(s.current_lyric_line().as_deref(), Some("Shizumu you ni"));
+
+        // Request translation via CoreCommand::TranslateLyrics
+        let fx_tr = s.handle_command(CoreCommand::TranslateLyrics("en".into()));
+        assert!(fx_tr.ext_jobs.iter().any(|(_, j)| matches!(
+            j,
+            AsyncExtJob::LyricsTranslate { target_lang, lines, .. }
+                if target_lang == "en" && lines.len() == 2
+        )));
+
+        // Receive translated lines and verify TntronStatus exposes both original and translated windows
+        s.handle_ext_async_result(ExtAsyncResult {
+            ext_id: "core.mc-translate".into(),
+            event_name: "lyricsTranslated".into(),
+            payload: serde_json::json!({
+                "path": track_path.display().to_string(),
+                "target_lang": "en",
+                "translations": ["As if sinking", "As if melting away"]
+            }),
+            stream_play: None,
+            rescan_after: false,
+        });
+        assert_eq!(s.current_lyric_translated().as_deref(), Some("As if sinking"));
+
+        let st = TntronStatus::from_state(&s);
+        assert_eq!(st.lyric, "Shizumu you ni");
+        assert_eq!(st.lyric_translated, "As if sinking");
+        assert_eq!(st.lyrics_target_lang.as_deref(), Some("en"));
+        assert_eq!(st.lyrics_window.len(), 2);
+        assert_eq!(st.lyrics_window_translated.len(), 2);
+        assert_eq!(st.lyrics_window_translated[0], "> As if sinking");
+        assert_eq!(st.lyrics_window_translated[1], "  As if melting away");
 
         let _ = std::fs::remove_dir_all(&root);
     }

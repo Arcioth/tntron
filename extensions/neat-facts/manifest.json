@@ -1,0 +1,11 @@
+{
+  "id": "tunotron.neat-facts",
+  "name": "Neat Facts & Vibe Quips",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Displays live bandwidth saved vs 720p YouTube, Tunotron lore, beat-aware quips, and rotating neat facts in your player bar and sidebar.",
+  "author": "tntron",
+  "main": "main.lua",
+  "permissions": ["playback:read", "ui:sidebar", "ui:player_widget", "storage", "notify"],
+  "requires": []
+}

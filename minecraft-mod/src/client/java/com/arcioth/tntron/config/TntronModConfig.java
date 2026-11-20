@@ -28,6 +28,8 @@ public final class TntronModConfig {
     public boolean showProgress = true;
     public boolean showMetaBadges = true;
     public boolean lyricsOverlayEnabled = true;
+    public String lyricsDisplayMode = "both"; // "original" | "translated" | "both"
+    public String lyricsTranslateLang = "en";
     public int lyricsYOffset = 62;
 
     // Reactive Visual & World Effects
@@ -71,11 +73,26 @@ public final class TntronModConfig {
         if (connectionMode == null || connectionMode.isBlank()) connectionMode = "auto";
         if (hudPosition == null || hudPosition.isBlank()) hudPosition = "top_left";
         if (notifyMode == null || notifyMode.isBlank()) notifyMode = "toast";
+        if (lyricsDisplayMode == null) lyricsDisplayMode = "both";
+        if (!"original".equals(lyricsDisplayMode)
+                && !"translated".equals(lyricsDisplayMode)
+                && !"both".equals(lyricsDisplayMode)) {
+            lyricsDisplayMode = "both";
+        }
+        if (lyricsTranslateLang == null || lyricsTranslateLang.isBlank()) lyricsTranslateLang = "en";
         if (customAccentHex == null || customAccentHex.isBlank()) customAccentHex = "#1db954";
         hudScale = Math.max(0.6f, Math.min(1.6f, hudScale));
         hudOpacity = Math.max(0.25f, Math.min(1.0f, hudOpacity));
         beatIntensity = Math.max(0.0f, Math.min(1.5f, beatIntensity));
         lyricsYOffset = Math.max(36, Math.min(160, lyricsYOffset));
+    }
+
+    public String lyricsDisplayLabel() {
+        return switch (lyricsDisplayMode) {
+            case "original" -> "Original";
+            case "translated" -> "Translated";
+            default -> "Both";
+        };
     }
 
     public synchronized void save() {
