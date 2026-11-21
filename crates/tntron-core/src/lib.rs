@@ -1,3 +1,4 @@
+pub mod android;
 pub mod audio;
 pub mod bundled_extensions;
 pub mod clock;
@@ -11,6 +12,10 @@ pub mod library;
 pub mod network;
 pub mod storage;
 
+pub use android::{
+    AndroidBridgeHandle, AndroidBridgeStatus, AndroidMediaPlayer, AudioSinkInfo,
+    BluetoothDeviceInfo, BtAudioStreamInfo,
+};
 pub use clock::{AbLoop, AudioPreset, DspSettings, LoopMode, PlayState, PlaybackClock, ShuffleMode};
 pub use discord_rpc::DiscordPreview;
 pub use engine::{
@@ -34,4 +39,5 @@ pub use storage::{
     parse_tnt_share_json, ButtonPackConfig, DiscordRpcConfig, IconPackConfig, LayoutConfig,
     LinuxDisplayEnv, LogoConfig, MinecraftLinkConfig, PersistentState, PopupPlayerConfig,
     ProfileConfig, ProfileTrackStat, ReactiveUiConfig, SpeedPreset, TrackSort, TransparencyConfig,
+    AndroidLinkConfig,
 };

@@ -7,6 +7,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
+use crate::android::{AndroidBridgeHandle, AndroidBridgeStatus};
 use crate::clock::PlayState;
 use crate::engine::{CoreCommand, CoreState};
 use crate::library::format_mmss;
@@ -562,6 +563,7 @@ pub enum IpcQueryKind {
     GetThemes,
     GetExtensions,
     GetCover,
+    GetAndroidStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -637,11 +639,23 @@ pub enum IpcCommand {
         detail: Option<String>,
     },
     TranslateLyrics { lang: String },
+    GetAndroidStatus,
+    SetAudioSink { sink_name: String },
+    SwitchAudioSource { source: String },
+    AndroidMedia {
+        action: String,
+        player_path: Option<String>,
+    },
+    BtConnect { device_path: String },
+    BtDisconnect { device_path: String },
+    BtReverseAudio { device_path: String },
+    BtStreamVolume { volume_pct: u32 },
+    BtStreamMute { muted: bool },
     Status,
     Subscribe,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IpcResponse {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -656,6 +670,8 @@ pub struct IpcResponse {
     pub extensions: Option<Vec<IpcExtensionItem>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub android: Option<AndroidBridgeStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
@@ -702,7 +718,16 @@ pub async fn run_ipc_server(
         let mc_bridge = mc_bridge.clone();
         tokio::spawn(async move {
             let (read_half, write_half) = stream.into_split();
-            let _ = handle_client(read_half, write_half, cmd_tx, status_rx, sub_rx, mc_bridge, false).await;
+            let _ = handle_client(
+                read_half,
+                write_half,
+                cmd_tx,
+                status_rx,
+                sub_rx,
+                mc_bridge,
+                String::new(),
+            )
+            .await;
         });
     }
 }
@@ -761,6 +786,7 @@ pub async fn run_mc_tcp_server(
                             tokio::spawn(async move {
                                 bridge.inc_clients();
                                 let (read_half, write_half) = stream.into_split();
+                                let token = bridge.config_snapshot().auth_token;
                                 let _ = handle_client(
                                     read_half,
                                     write_half,
@@ -768,13 +794,102 @@ pub async fn run_mc_tcp_server(
                                     status_rx,
                                     sub_rx,
                                     bridge.clone(),
-                                    true,
+                                    token,
                                 ).await;
                                 bridge.dec_clients();
                             });
                         }
                         Err(e) => {
                             tracing::warn!("Minecraft Link TCP accept error: {e}");
+                            break;
+                        }
+                    }
+                }
+                res = cfg_rx.changed() => {
+                    if res.is_err() {
+                        return;
+                    }
+                    let next = cfg_rx.borrow().clone();
+                    if next != cfg {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub async fn run_android_tcp_server(
+    cmd_tx: mpsc::Sender<CoreCommand>,
+    status_rx: watch::Receiver<TntronStatus>,
+    broadcast_tx: broadcast::Sender<TntronStatus>,
+    mc_bridge: McBridgeHandle,
+    android_bridge: AndroidBridgeHandle,
+) {
+    let mut cfg_rx = android_bridge.subscribe_config();
+
+    loop {
+        let cfg = cfg_rx.borrow().clone();
+        if !cfg.enabled || !cfg.lan_enabled {
+            if cfg_rx.changed().await.is_err() {
+                return;
+            }
+            continue;
+        }
+
+        let host = if cfg.bind_host.trim().is_empty() {
+            "0.0.0.0".to_string()
+        } else {
+            cfg.bind_host.trim().to_string()
+        };
+        let addr = format!("{host}:{}", cfg.tcp_port);
+
+        let listener = match TcpListener::bind(&addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!("Android Link TCP bind failed on {addr}: {e}");
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+                    res = cfg_rx.changed() => {
+                        if res.is_err() {
+                            return;
+                        }
+                    }
+                }
+                continue;
+            }
+        };
+        tracing::info!("Android Link TCP bridge listening on {addr}");
+
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    match accepted {
+                        Ok((stream, _)) => {
+                            let _ = stream.set_nodelay(true);
+                            let cmd_tx = cmd_tx.clone();
+                            let status_rx = status_rx.clone();
+                            let sub_rx = broadcast_tx.subscribe();
+                            let mcb = mc_bridge.clone();
+                            let ab = android_bridge.clone();
+                            tokio::spawn(async move {
+                                ab.inc_clients();
+                                let (read_half, write_half) = stream.into_split();
+                                let token = ab.config_snapshot().auth_token;
+                                let _ = handle_client(
+                                    read_half,
+                                    write_half,
+                                    cmd_tx,
+                                    status_rx,
+                                    sub_rx,
+                                    mcb,
+                                    token,
+                                ).await;
+                                ab.dec_clients();
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!("Android Link TCP accept error: {e}");
                             break;
                         }
                     }
@@ -810,14 +925,9 @@ async fn handle_client<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     status_rx: watch::Receiver<TntronStatus>,
     mut sub_rx: broadcast::Receiver<TntronStatus>,
     mc_bridge: McBridgeHandle,
-    is_tcp: bool,
+    expected_token: String,
 ) -> anyhow::Result<()> {
     let mut lines = BufReader::new(read_half).lines();
-    let expected_token = if is_tcp {
-        mc_bridge.config_snapshot().auth_token
-    } else {
-        String::new()
-    };
     let mut authed = expected_token.trim().is_empty();
 
     while let Some(line) = lines.next_line().await? {
@@ -830,12 +940,7 @@ async fn handle_client<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 &IpcResponse {
                     ok: false,
                     error: Some("invalid command JSON".into()),
-                    status: None,
-                    library: None,
-                    themes: None,
-                    extensions: None,
-                    cover_base64: None,
-                    message: None,
+                    ..Default::default()
                 },
             )
             .await?;
@@ -843,21 +948,16 @@ async fn handle_client<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         };
 
         if let IpcCommand::Auth { token } = req {
-            let current_token = mc_bridge.config_snapshot().auth_token;
-            if current_token.trim().is_empty() || token == current_token {
+            if expected_token.trim().is_empty() || token == expected_token {
                 authed = true;
                 let st = status_rx.borrow().clone();
                 send_response(
                     &mut write_half,
                     &IpcResponse {
                         ok: true,
-                        error: None,
                         status: Some(st),
-                        library: None,
-                        themes: None,
-                        extensions: None,
-                        cover_base64: None,
                         message: Some("authenticated".into()),
+                        ..Default::default()
                     },
                 )
                 .await?;
@@ -867,12 +967,7 @@ async fn handle_client<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                     &IpcResponse {
                         ok: false,
                         error: Some("invalid auth token".into()),
-                        status: None,
-                        library: None,
-                        themes: None,
-                        extensions: None,
-                        cover_base64: None,
-                        message: None,
+                        ..Default::default()
                     },
                 )
                 .await?;
@@ -886,12 +981,7 @@ async fn handle_client<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 &IpcResponse {
                     ok: false,
                     error: Some("authentication required".into()),
-                    status: None,
-                    library: None,
-                    themes: None,
-                    extensions: None,
-                    cover_base64: None,
-                    message: None,
+                    ..Default::default()
                 },
             )
             .await?;
@@ -980,6 +1070,19 @@ async fn handle_client<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 }
                 continue;
             }
+            IpcCommand::GetAndroidStatus => {
+                let (tx, rx) = oneshot::channel();
+                let _ = cmd_tx
+                    .send(CoreCommand::IpcQuery {
+                        req: IpcQueryKind::GetAndroidStatus,
+                        reply: Arc::new(std::sync::Mutex::new(Some(tx))),
+                    })
+                    .await;
+                if let Ok(Ok(resp)) = tokio::time::timeout(Duration::from_secs(2), rx).await {
+                    send_response(&mut write_half, &resp).await?;
+                }
+                continue;
+            }
             IpcCommand::McTelemetry(telemetry) => {
                 mc_bridge.record_telemetry(telemetry.clone());
                 let _ = cmd_tx.send(CoreCommand::McTelemetry(telemetry)).await;
@@ -988,13 +1091,8 @@ async fn handle_client<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                     &mut write_half,
                     &IpcResponse {
                         ok: true,
-                        error: None,
                         status: Some(st),
-                        library: None,
-                        themes: None,
-                        extensions: None,
-                        cover_base64: None,
-                        message: None,
+                        ..Default::default()
                     },
                 )
                 .await?;
@@ -1010,13 +1108,8 @@ async fn handle_client<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                     &mut write_half,
                     &IpcResponse {
                         ok: true,
-                        error: None,
                         status: Some(st),
-                        library: None,
-                        themes: None,
-                        extensions: None,
-                        cover_base64: None,
-                        message: None,
+                        ..Default::default()
                     },
                 )
                 .await?;
@@ -1040,13 +1133,8 @@ async fn handle_client<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             &mut write_half,
             &IpcResponse {
                 ok: true,
-                error: None,
                 status: Some(st),
-                library: None,
-                themes: None,
-                extensions: None,
-                cover_base64: None,
-                message: None,
+                ..Default::default()
             },
         )
         .await?;
@@ -1175,6 +1263,22 @@ fn translate_ipc_command(req: IpcCommand, current_track_path: &str) -> Vec<CoreC
             value: value.unwrap_or(serde_json::Value::Bool(true)),
         }],
         IpcCommand::TranslateLyrics { lang } => vec![CoreCommand::TranslateLyrics(lang)],
+        IpcCommand::SetAudioSink { sink_name } => vec![CoreCommand::SetAudioSink(sink_name)],
+        IpcCommand::SwitchAudioSource { source } => vec![CoreCommand::SwitchAudioSource(source)],
+        IpcCommand::AndroidMedia {
+            action,
+            player_path,
+        } => vec![CoreCommand::AndroidMedia {
+            action,
+            player_path,
+        }],
+        IpcCommand::BtConnect { device_path } => vec![CoreCommand::BtConnect(device_path)],
+        IpcCommand::BtDisconnect { device_path } => vec![CoreCommand::BtDisconnect(device_path)],
+        IpcCommand::BtReverseAudio { device_path } => {
+            vec![CoreCommand::BtReverseAudio(device_path)]
+        }
+        IpcCommand::BtStreamVolume { volume_pct } => vec![CoreCommand::BtStreamVolume(volume_pct)],
+        IpcCommand::BtStreamMute { muted } => vec![CoreCommand::BtStreamMute(muted)],
         _ => Vec::new(),
     }
 }

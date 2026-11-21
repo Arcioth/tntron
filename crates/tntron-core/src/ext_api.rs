@@ -22,6 +22,7 @@ pub const VALID_PERMISSIONS: &[&str] = &[
     "network",
     "hw:control",
     "mc:link",
+    "android:link",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -441,6 +442,39 @@ pub enum ExtHostCommand {
         kind: String,
         title: String,
         body: String,
+    },
+    AndroidSetConfig {
+        patch: serde_json::Value,
+    },
+    AndroidRefresh,
+    AndroidBtConnect {
+        device_path: String,
+    },
+    AndroidBtDisconnect {
+        device_path: String,
+    },
+    AndroidBtReverseAudio {
+        device_path: String,
+    },
+    AndroidBtDiscoverable {
+        discoverable: bool,
+    },
+    AndroidMedia {
+        media_cmd: String,
+        #[serde(default)]
+        player_path: Option<String>,
+    },
+    AndroidSetSink {
+        sink_name: String,
+    },
+    AndroidBtVolume {
+        volume_pct: u32,
+    },
+    AndroidBtMute {
+        muted: bool,
+    },
+    AndroidSwitchSource {
+        source: String,
     },
 }
 

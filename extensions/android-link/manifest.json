@@ -1,0 +1,21 @@
+{
+  "id": "tntron.android-link",
+  "name": "Android & Bluetooth Link",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "description": "Controls paired Android playback (BlueZ AVRCP), streams reverse Bluetooth audio (A2DP Sink) to PC speakers, switches PipeWire audio outputs/sources, and hosts the LAN/USB companion app bridge.",
+  "author": "tntron",
+  "main": "main.lua",
+  "permissions": [
+    "android:link",
+    "playback:read",
+    "playback:control",
+    "ui:sidebar",
+    "ui:settings",
+    "ui:topbar",
+    "ui:player_widget",
+    "storage",
+    "notify"
+  ],
+  "requires": []
+}
