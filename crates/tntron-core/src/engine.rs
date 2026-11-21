@@ -25,10 +25,10 @@ use crate::hardware::{
     spawn_hardware_worker, HardwareCmd,
 };
 use crate::ipc::{
-    default_cover_cache_path, encode_base64, run_android_tcp_server, run_ipc_server,
-    run_mc_tcp_server, write_status_file, IpcExtensionItem, IpcLibraryData, IpcLibraryFolder,
-    IpcLibraryTrack, IpcQueryKind, IpcResponse, IpcThemeItem, McBridgeHandle, McTelemetry,
-    TntronStatus, BUILTIN_THEME_ITEMS,
+    default_cover_cache_path, encode_base64, run_android_bt_rfcomm_server, run_android_tcp_server,
+    run_ipc_server, run_mc_tcp_server, write_status_file, IpcExtensionItem, IpcLibraryData,
+    IpcLibraryFolder, IpcLibraryTrack, IpcQueryKind, IpcResponse, IpcThemeItem, McBridgeHandle,
+    McTelemetry, TntronStatus, BUILTIN_THEME_ITEMS,
 };
 use crate::library::{
     analyze_stream_progressive, analyze_track_blocking, copy_track_to_folder_in_jail,
@@ -4504,15 +4504,31 @@ pub async fn run_core_runtime(
     });
 
     let bcast_android = broadcast_tx.clone();
+    let cmd_tx_for_android_tcp = cmd_tx_for_ipc.clone();
+    let status_watch_rx_android_tcp = status_watch_rx.clone();
     let mc_bridge_for_android = state.mc_bridge.clone();
     let android_bridge_tcp = state.android_bridge.clone();
     tokio::spawn(async move {
         run_android_tcp_server(
-            cmd_tx_for_ipc,
-            status_watch_rx,
+            cmd_tx_for_android_tcp,
+            status_watch_rx_android_tcp,
             bcast_android,
             mc_bridge_for_android,
             android_bridge_tcp,
+        )
+        .await;
+    });
+
+    let bcast_bt = broadcast_tx.clone();
+    let mc_bridge_for_bt = state.mc_bridge.clone();
+    let android_bridge_bt = state.android_bridge.clone();
+    tokio::spawn(async move {
+        run_android_bt_rfcomm_server(
+            cmd_tx_for_ipc,
+            status_watch_rx,
+            bcast_bt,
+            mc_bridge_for_bt,
+            android_bridge_bt,
         )
         .await;
     });

@@ -13,12 +13,19 @@ public final class SpectrumView extends View {
     private final Paint bgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF rect = new RectF();
     private int accentColor = 0xFF1DB954;
+    private int surfaceColor = 0xFF0E1320;
     private boolean playing = false;
 
     public SpectrumView(Context context) {
         super(context);
-        bgPaint.setColor(0xFF0E1320);
+        bgPaint.setColor(surfaceColor);
         barPaint.setColor(accentColor);
+    }
+
+    public void setSurfaceColor(int color) {
+        this.surfaceColor = color;
+        bgPaint.setColor(color);
+        invalidate();
     }
 
     public void updateSpectrum(float[] bands, int accent, boolean isPlaying) {

@@ -217,16 +217,17 @@ local function render()
         tntron.ui.toggle("show_player_widget", "Player Source Pill", st.cfg.show_player_widget),
     }))
 
-    -- Companion Android App Bridge (LAN + USB adb reverse)
-    table.insert(widgets, tntron.ui.heading("Android Companion App Bridge (LAN / USB)"))
+    -- Companion Android App Bridge (Bluetooth RFCOMM + LAN + USB adb reverse)
+    table.insert(widgets, tntron.ui.heading("Android Companion App Bridge (Bluetooth / LAN / USB)"))
     local ips = (type(status.lan_ips) == "table" and #status.lan_ips > 0)
         and table.concat(status.lan_ips, ", ")
         or "127.0.0.1"
     table.insert(widgets, tntron.ui.row({
         tntron.ui.badge("App Clients: " .. tostring(status.android_clients or 0), { icon = "globe", accent = (tonumber(status.android_clients) or 0) > 0 }),
+        tntron.ui.badge("Bluetooth RFCOMM: Ch 22", { icon = "headphones", accent = status.bluez_available == true }),
         tntron.ui.badge("tcp://" .. ips .. ":" .. tostring(st.cfg.tcp_port), { icon = "sliders", accent = st.cfg.lan_enabled }),
     }))
-    table.insert(widgets, tntron.ui.text("USB tip: run `adb reverse tcp:" .. tostring(st.cfg.tcp_port) .. " tcp:" .. tostring(st.cfg.tcp_port) .. "` to connect over USB cable.", true))
+    table.insert(widgets, tntron.ui.text("Bluetooth Link works directly with paired devices (no Wi-Fi/firewall needed). USB tip: `adb reverse tcp:" .. tostring(st.cfg.tcp_port) .. " tcp:" .. tostring(st.cfg.tcp_port) .. "`.", true))
     table.insert(widgets, tntron.ui.row({
         tntron.ui.toggle("lan_enabled", "Enable Companion App TCP Bridge", st.cfg.lan_enabled),
         tntron.ui.button("bind:0.0.0.0", "Wi-Fi LAN (0.0.0.0)", { active = st.cfg.bind_host == "0.0.0.0" }),

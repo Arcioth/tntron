@@ -1,11 +1,17 @@
 package com.arcioth.tntron.android;
 
+import android.Manifest;
+import android.annotation.SuppressLint;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
 import android.text.TextUtils;
@@ -13,10 +19,10 @@ import android.util.Base64;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -24,18 +30,28 @@ import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+
 public final class MainActivity extends AppCompatActivity implements TntronRemoteClient.Listener {
     private static final String PREFS = "tntron_remote_prefs";
+    private static final int REQ_BT_PERMS = 2626;
 
     private TntronRemoteClient client;
     private SharedPreferences prefs;
 
-    private int accentColor = 0xFF1DB954;
+    private HostUiStyle uiStyle = new HostUiStyle();
+    private String lastStyleFingerprint = "";
     private int activeTab = 0; // 0=Player, 1=DSP, 2=Library, 3=Audio/BT, 4=Connect
     private int libMode = 0;   // 0=Tracks, 1=Folders, 2=Queue
 
@@ -51,8 +67,22 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
     private boolean userVolDragging = false;
     private boolean userSpeedDragging = false;
 
+    // Tracked views for live host theme & button pack sync
+    private LinearLayout rootLayout;
+    private LinearLayout headerBar;
+    private LinearLayout bottomNav;
+    private final List<View> trackedCards = new ArrayList<>();
+    private final List<Button> trackedPrimaryBtns = new ArrayList<>();
+    private final List<Button> trackedSecondaryBtns = new ArrayList<>();
+    private final List<TextView> trackedHeadings = new ArrayList<>();
+    private final List<TextView> trackedPrimaryTexts = new ArrayList<>();
+    private final List<TextView> trackedMutedTexts = new ArrayList<>();
+    private final List<EditText> trackedInputs = new ArrayList<>();
+    private final List<SeekBar> trackedSeekBars = new ArrayList<>();
+
     // Header
     private TextView headerBrand;
+    private TextView headerThemeBadge;
     private TextView headerStatusPill;
     private final Button[] navButtons = new Button[5];
     private final View[] tabPages = new View[5];
@@ -99,6 +129,7 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
     private TextView btVolLabel;
 
     // Tab 4: Connect & Themes
+    private LinearLayout pairedPcContainer;
     private EditText hostInput;
     private EditText portInput;
     private EditText tokenInput;
@@ -112,16 +143,14 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         client = new TntronRemoteClient(this);
 
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(0xFF0A0D14);
+        rootLayout = new LinearLayout(this);
+        rootLayout.setOrientation(LinearLayout.VERTICAL);
 
-        root.addView(buildHeader());
+        rootLayout.addView(buildHeader());
 
         FrameLayout content = new FrameLayout(this);
-        LinearLayout.LayoutParams contentLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
-        root.addView(content, contentLp);
+        rootLayout.addView(content, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         tabPages[0] = buildPlayerTab();
         tabPages[1] = buildDspTab();
@@ -133,17 +162,30 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         }
 
-        root.addView(buildBottomNav());
-        setContentView(root);
+        rootLayout.addView(buildBottomNav());
+        setContentView(rootLayout);
+        applyHostUiStyle(uiStyle);
         selectTab(0);
 
+        String savedMode = prefs.getString("mode", "bt");
+        String savedBtMac = prefs.getString("bt_mac", "");
+        String savedBtName = prefs.getString("bt_name", "");
         String savedHost = prefs.getString("host", "127.0.0.1");
         int savedPort = prefs.getInt("port", 26263);
         String savedToken = prefs.getString("token", "");
         hostInput.setText(savedHost);
         portInput.setText(String.valueOf(savedPort));
         tokenInput.setText(savedToken);
-        client.configureAndConnect(savedHost, savedPort, savedToken);
+
+        ensureBluetoothPermissionAndRefresh();
+
+        if ("bt".equals(savedMode) && !savedBtMac.isEmpty() && hasBluetoothConnectPermission()) {
+            client.connectBluetooth(savedBtMac, savedBtName);
+        } else if ("tcp".equals(savedMode)) {
+            client.configureAndConnect(savedHost, savedPort, savedToken);
+        } else if (hasBluetoothConnectPermission()) {
+            autoConnectFirstPairedPc();
+        }
     }
 
     @Override
@@ -152,8 +194,109 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         if (client != null) client.shutdown();
     }
 
+    private float density() {
+        return getResources().getDisplayMetrics().density;
+    }
+
     private int dp(int v) {
-        return Math.round(v * getResources().getDisplayMetrics().density);
+        return Math.round(v * density());
+    }
+
+    private boolean hasBluetoothConnectPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true;
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void ensureBluetoothPermissionAndRefresh() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !hasBluetoothConnectPermission()) {
+            ActivityCompat.requestPermissions(this,
+                    new String[]{Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN},
+                    REQ_BT_PERMS);
+        } else {
+            refreshPairedBluetoothDevices();
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQ_BT_PERMS) {
+            refreshPairedBluetoothDevices();
+            if (hasBluetoothConnectPermission() && !client.isConnected()) {
+                String savedMac = prefs.getString("bt_mac", "");
+                String savedName = prefs.getString("bt_name", "");
+                if (!savedMac.isEmpty()) {
+                    client.connectBluetooth(savedMac, savedName);
+                } else {
+                    autoConnectFirstPairedPc();
+                }
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private void autoConnectFirstPairedPc() {
+        if (!hasBluetoothConnectPermission()) return;
+        BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+        if (adapter == null || !adapter.isEnabled()) return;
+        Set<BluetoothDevice> bonded = adapter.getBondedDevices();
+        if (bonded == null || bonded.isEmpty()) return;
+        BluetoothDevice best = null;
+        for (BluetoothDevice d : bonded) {
+            String n = d.getName() != null ? d.getName().toLowerCase() : "";
+            if (n.contains("nixos") || n.contains("linux") || n.contains("pc") || n.contains("desktop") || n.contains("laptop")) {
+                best = d;
+                break;
+            }
+            if (best == null) best = d;
+        }
+        if (best != null) {
+            String name = best.getName() != null ? best.getName() : best.getAddress();
+            prefs.edit().putString("mode", "bt").putString("bt_mac", best.getAddress()).putString("bt_name", name).apply();
+            client.connectBluetooth(best.getAddress(), name);
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private void refreshPairedBluetoothDevices() {
+        if (pairedPcContainer == null) return;
+        pairedPcContainer.removeAllViews();
+
+        if (!hasBluetoothConnectPermission()) {
+            pairedPcContainer.addView(makeDynamicBtn("Grant Bluetooth Permission", true, v -> ensureBluetoothPermissionAndRefresh()));
+            return;
+        }
+        BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+        if (adapter == null) {
+            pairedPcContainer.addView(makeMutedLabel("Bluetooth not available on this device."));
+            return;
+        }
+        if (!adapter.isEnabled()) {
+            pairedPcContainer.addView(makeMutedLabel("Turn on Bluetooth to connect directly to tntron."));
+            return;
+        }
+        Set<BluetoothDevice> bonded = adapter.getBondedDevices();
+        if (bonded == null || bonded.isEmpty()) {
+            pairedPcContainer.addView(makeMutedLabel("No paired Bluetooth devices found. Pair with your PC first."));
+            return;
+        }
+        String activeMac = prefs.getString("bt_mac", "");
+        for (BluetoothDevice dev : bonded) {
+            String mac = dev.getAddress();
+            String name = (dev.getName() != null && !dev.getName().isEmpty()) ? dev.getName() : mac;
+            boolean isSel = mac.equalsIgnoreCase(activeMac) && client.getMode() == TntronRemoteClient.Mode.BLUETOOTH;
+            Button b = makeDynamicBtn((isSel && client.isConnected() ? "● " : "ᛒ ") + name + " (" + mac + ")", isSel, v -> {
+                prefs.edit().putString("mode", "bt").putString("bt_mac", mac).putString("bt_name", name).apply();
+                client.connectBluetooth(mac, name);
+                Toast.makeText(this, "Bluetooth connecting to " + name + "...", Toast.LENGTH_SHORT).show();
+                refreshPairedBluetoothDevices();
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.bottomMargin = dp(6);
+            pairedPcContainer.addView(b, lp);
+        }
     }
 
     private GradientDrawable roundedBg(int fillColor, int strokeColor, int radiusDp) {
@@ -167,19 +310,18 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
     private LinearLayout makeCard() {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackground(roundedBg(0xFF131826, 0x22FFFFFF, 14));
         card.setPadding(dp(14), dp(12), dp(14), dp(12));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.bottomMargin = dp(10);
         card.setLayoutParams(lp);
+        trackedCards.add(card);
         return card;
     }
 
     private TextView makeSectionHeading(String text) {
         TextView tv = new TextView(this);
         tv.setText(text);
-        tv.setTextColor(0xFF94A3B8);
         tv.setTextSize(12f);
         tv.setTypeface(Typeface.DEFAULT_BOLD);
         tv.setAllCaps(true);
@@ -187,23 +329,109 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.bottomMargin = dp(6);
         tv.setLayoutParams(lp);
+        trackedHeadings.add(tv);
+        return tv;
+    }
+
+    private TextView makeMutedLabel(String text) {
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextColor(uiStyle.muted);
+        tv.setTextSize(12f);
+        tv.setPadding(0, dp(2), 0, dp(4));
         return tv;
     }
 
     private Button makeBtn(String label, boolean primary, View.OnClickListener onClick) {
+        Button b = makeDynamicBtn(label, primary, onClick);
+        if (primary) trackedPrimaryBtns.add(b);
+        else trackedSecondaryBtns.add(b);
+        return b;
+    }
+
+    private Button makeDynamicBtn(String label, boolean primary, View.OnClickListener onClick) {
         Button b = new Button(this);
         b.setText(label);
         b.setAllCaps(false);
         b.setTextSize(13f);
-        b.setTextColor(primary ? 0xFF06100A : 0xFFF1F5F9);
-        b.setBackground(roundedBg(primary ? accentColor : 0xFF1D2436, 0x22FFFFFF, 10));
         b.setPadding(dp(10), dp(6), dp(10), dp(6));
         b.setMinimumHeight(dp(38));
         b.setMinHeight(dp(38));
         b.setMinWidth(0);
         b.setMinimumWidth(0);
         b.setOnClickListener(onClick);
+        styleButton(b, primary);
         return b;
+    }
+
+    private void styleButton(Button b, boolean primary) {
+        b.setBackground(new TntronButtonDrawable(uiStyle, primary, density()));
+        b.setTextColor(primary ? uiStyle.accentFg : uiStyle.text);
+    }
+
+    private void styleSeekBar(SeekBar sb) {
+        sb.setProgressTintList(ColorStateList.valueOf(uiStyle.accent));
+        sb.setThumbTintList(ColorStateList.valueOf(uiStyle.accent));
+        sb.setProgressBackgroundTintList(ColorStateList.valueOf(uiStyle.muted));
+    }
+
+    private void applyHostUiStyle(HostUiStyle s) {
+        this.uiStyle = s;
+        int strokeCol = s.isLight ? 0x22000000 : 0x22FFFFFF;
+
+        Window win = getWindow();
+        if (win != null) {
+            win.setStatusBarColor(s.base);
+            win.setNavigationBarColor(s.sidebar);
+            WindowInsetsControllerCompat ctrl = new WindowInsetsControllerCompat(win, win.getDecorView());
+            ctrl.setAppearanceLightStatusBars(s.isLight);
+            ctrl.setAppearanceLightNavigationBars(s.isLight);
+        }
+
+        if (rootLayout != null) rootLayout.setBackgroundColor(s.base);
+        if (headerBar != null) headerBar.setBackgroundColor(s.sidebar);
+        if (bottomNav != null) bottomNav.setBackgroundColor(s.sidebar);
+        if (headerBrand != null) headerBrand.setTextColor(s.logoColor);
+        if (headerThemeBadge != null) {
+            String presetTag = s.buttonEnabled ? (" · " + s.buttonPreset) : "";
+            headerThemeBadge.setText(s.themeLabel + presetTag);
+            headerThemeBadge.setTextColor(s.muted);
+        }
+        if (headerStatusPill != null) {
+            headerStatusPill.setBackground(roundedBg(s.card, strokeCol, 20));
+        }
+
+        for (View card : trackedCards) {
+            int cardStroke = (s.buttonEnabled && s.outlineEnabled && s.outlineColor != 0) ? s.outlineColor : strokeCol;
+            card.setBackground(roundedBg(s.card, cardStroke, 14));
+        }
+        for (Button b : trackedPrimaryBtns) styleButton(b, true);
+        for (Button b : trackedSecondaryBtns) styleButton(b, false);
+        for (TextView tv : trackedHeadings) tv.setTextColor(s.muted);
+        for (TextView tv : trackedPrimaryTexts) tv.setTextColor(s.text);
+        for (TextView tv : trackedMutedTexts) tv.setTextColor(s.muted);
+        for (EditText et : trackedInputs) {
+            et.setBackground(roundedBg(s.surface, strokeCol, 10));
+            et.setTextColor(s.text);
+            et.setHintTextColor(s.muted);
+        }
+        for (SeekBar sb : trackedSeekBars) styleSeekBar(sb);
+
+        if (spectrumView != null) spectrumView.setSurfaceColor(s.surface);
+        if (coverView != null) coverView.setBackground(roundedBg(s.surface, strokeCol, 16));
+        if (metaView != null) metaView.setTextColor(s.accent);
+        if (dspSummaryView != null) dspSummaryView.setTextColor(s.accent);
+        if (audioSourceSummary != null) audioSourceSummary.setTextColor(s.accent);
+
+        updateNavHighlight();
+    }
+
+    private void updateNavHighlight() {
+        for (int i = 0; i < navButtons.length; i++) {
+            if (navButtons[i] != null) {
+                styleButton(navButtons[i], i == activeTab);
+            }
+        }
     }
 
     private LinearLayout makeRow() {
@@ -226,57 +454,60 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
     }
 
     private View buildHeader() {
-        LinearLayout bar = new LinearLayout(this);
-        bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setBackgroundColor(0xFF101521);
-        bar.setPadding(dp(14), dp(12), dp(14), dp(10));
+        headerBar = new LinearLayout(this);
+        headerBar.setOrientation(LinearLayout.HORIZONTAL);
+        headerBar.setGravity(Gravity.CENTER_VERTICAL);
+        headerBar.setPadding(dp(14), dp(12), dp(14), dp(10));
 
+        LinearLayout titleCol = new LinearLayout(this);
+        titleCol.setOrientation(LinearLayout.VERTICAL);
         headerBrand = new TextView(this);
         headerBrand.setText("tntron");
-        headerBrand.setTextColor(accentColor);
         headerBrand.setTextSize(19f);
         headerBrand.setTypeface(Typeface.DEFAULT_BOLD);
-        bar.addView(headerBrand, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        titleCol.addView(headerBrand);
+
+        headerThemeBadge = new TextView(this);
+        headerThemeBadge.setText("Openify");
+        headerThemeBadge.setTextSize(10f);
+        titleCol.addView(headerThemeBadge);
+        headerBar.addView(titleCol, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         headerStatusPill = new TextView(this);
-        headerStatusPill.setText("Connecting...");
-        headerStatusPill.setTextColor(0xFFF8FAFC);
+        headerStatusPill.setText("○ Offline");
+        headerStatusPill.setTextColor(0xFFF87171);
         headerStatusPill.setTextSize(11f);
-        headerStatusPill.setPadding(dp(10), dp(4), dp(10), dp(4));
-        headerStatusPill.setBackground(roundedBg(0xFF1F2937, 0x33FFFFFF, 20));
+        headerStatusPill.setPadding(dp(10), dp(5), dp(10), dp(5));
         headerStatusPill.setOnClickListener(v -> selectTab(4));
-        bar.addView(headerStatusPill);
-        return bar;
+        headerBar.addView(headerStatusPill);
+        return headerBar;
     }
 
     private View buildBottomNav() {
-        LinearLayout nav = new LinearLayout(this);
-        nav.setOrientation(LinearLayout.HORIZONTAL);
-        nav.setBackgroundColor(0xFF101521);
-        nav.setPadding(dp(4), dp(6), dp(4), dp(8));
+        bottomNav = new LinearLayout(this);
+        bottomNav.setOrientation(LinearLayout.HORIZONTAL);
+        bottomNav.setPadding(dp(4), dp(6), dp(4), dp(8));
         String[] labels = {"Player", "DSP", "Library", "Audio/BT", "Connect"};
         for (int i = 0; i < 5; i++) {
             final int idx = i;
-            Button b = makeBtn(labels[i], false, v -> selectTab(idx));
+            Button b = makeDynamicBtn(labels[i], false, v -> selectTab(idx));
             b.setTextSize(11f);
             navButtons[i] = b;
-            addWeightedBtn(nav, b, 1f);
+            addWeightedBtn(bottomNav, b, 1f);
         }
-        return nav;
+        return bottomNav;
     }
 
     private void selectTab(int idx) {
         activeTab = idx;
         for (int i = 0; i < tabPages.length; i++) {
             tabPages[i].setVisibility(i == idx ? View.VISIBLE : View.GONE);
-            boolean active = (i == idx);
-            navButtons[i].setBackground(roundedBg(active ? accentColor : 0xFF171D2D, 0, 10));
-            navButtons[i].setTextColor(active ? 0xFF06100A : 0xFFCBD5E1);
         }
+        updateNavHighlight();
         if (idx == 2) refreshLibrary();
         else if (idx == 3) refreshAndroidStatus();
         else if (idx == 4) {
+            refreshPairedBluetoothDevices();
             refreshThemes();
             refreshExtensions();
         }
@@ -289,39 +520,36 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         col.setPadding(dp(14), dp(12), dp(14), dp(14));
         sv.addView(col);
 
-        // Cover Art + Track Info
         LinearLayout heroCard = makeCard();
         heroCard.setGravity(Gravity.CENTER_HORIZONTAL);
         coverView = new ImageView(this);
         coverView.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        coverView.setBackground(roundedBg(0xFF1E2433, 0x33FFFFFF, 16));
         coverView.setImageResource(R.mipmap.ic_launcher);
-        LinearLayout.LayoutParams covLp = new LinearLayout.LayoutParams(dp(190), dp(190));
+        LinearLayout.LayoutParams covLp = new LinearLayout.LayoutParams(dp(186), dp(186));
         covLp.bottomMargin = dp(12);
         heroCard.addView(coverView, covLp);
 
         titleView = new TextView(this);
         titleView.setText("No Active Track");
-        titleView.setTextColor(0xFFF8FAFC);
         titleView.setTextSize(18f);
         titleView.setTypeface(Typeface.DEFAULT_BOLD);
         titleView.setGravity(Gravity.CENTER);
         titleView.setMaxLines(2);
         titleView.setEllipsize(TextUtils.TruncateAt.END);
+        trackedPrimaryTexts.add(titleView);
         heroCard.addView(titleView);
 
         artistView = new TextView(this);
-        artistView.setText("Connect to tntron on PC");
-        artistView.setTextColor(0xFF94A3B8);
+        artistView.setText("Connect to tntron via Bluetooth or Wi-Fi");
         artistView.setTextSize(13f);
         artistView.setGravity(Gravity.CENTER);
         artistView.setMaxLines(1);
         artistView.setEllipsize(TextUtils.TruncateAt.END);
+        trackedMutedTexts.add(artistView);
         heroCard.addView(artistView);
 
         metaView = new TextView(this);
         metaView.setText("");
-        metaView.setTextColor(accentColor);
         metaView.setTextSize(11f);
         metaView.setGravity(Gravity.CENTER);
         metaView.setPadding(0, dp(4), 0, dp(8));
@@ -332,9 +560,9 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         spLp.bottomMargin = dp(8);
         heroCard.addView(spectrumView, spLp);
 
-        // Seek bar
         seekBar = new SeekBar(this);
         seekBar.setMax(1000);
+        trackedSeekBars.add(seekBar);
         seekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar sb, int p, boolean fromUser) {
                 if (fromUser) {
@@ -355,18 +583,17 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         LinearLayout timeRow = makeRow();
         timeLeftView = new TextView(this);
         timeLeftView.setText("0:00");
-        timeLeftView.setTextColor(0xFF94A3B8);
         timeLeftView.setTextSize(11f);
+        trackedMutedTexts.add(timeLeftView);
         timeRightView = new TextView(this);
         timeRightView.setText("0:00");
-        timeRightView.setTextColor(0xFF94A3B8);
         timeRightView.setTextSize(11f);
         timeRightView.setGravity(Gravity.END);
+        trackedMutedTexts.add(timeRightView);
         timeRow.addView(timeLeftView, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         timeRow.addView(timeRightView, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         heroCard.addView(timeRow);
 
-        // Primary transport
         LinearLayout tRow = makeRow();
         addWeightedBtn(tRow, makeBtn("-10s", false, v -> sendSeekDelta(-10)), 0.8f);
         addWeightedBtn(tRow, makeBtn("⏮", false, v -> client.sendCmd("prev")), 1f);
@@ -376,7 +603,6 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         addWeightedBtn(tRow, makeBtn("+10s", false, v -> sendSeekDelta(10)), 0.8f);
         heroCard.addView(tRow);
 
-        // Secondary transport
         LinearLayout tRow2 = makeRow();
         shuffleBtn = makeBtn("🔀 Off", false, v -> client.sendCmd("shuffle"));
         loopBtn = makeBtn("🔁 All", false, v -> client.sendCmd("cycle_loop"));
@@ -388,13 +614,12 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         heroCard.addView(tRow2);
         col.addView(heroCard);
 
-        // Volume card
         LinearLayout volCard = makeCard();
         LinearLayout vHead = makeRow();
         volLabel = new TextView(this);
         volLabel.setText("PC Volume: 100%");
-        volLabel.setTextColor(0xFFCBD5E1);
         volLabel.setTextSize(13f);
+        trackedPrimaryTexts.add(volLabel);
         vHead.addView(volLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         muteBtn = makeBtn("Mute", false, v -> client.sendCmd("mute"));
         vHead.addView(muteBtn);
@@ -403,6 +628,7 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         volBar = new SeekBar(this);
         volBar.setMax(100);
         volBar.setProgress(100);
+        trackedSeekBars.add(volBar);
         volBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar sb, int p, boolean fromUser) {
                 if (fromUser) volLabel.setText("PC Volume: " + p + "%");
@@ -417,21 +643,19 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         volCard.addView(volBar);
         col.addView(volCard);
 
-        // Lyrics card
         LinearLayout lyrCard = makeCard();
         lyrCard.addView(makeSectionHeading("Live Synced Lyrics"));
         lyricCurrView = new TextView(this);
         lyricCurrView.setText("No synced lyrics");
-        lyricCurrView.setTextColor(accentColor);
         lyricCurrView.setTextSize(15f);
         lyricCurrView.setTypeface(Typeface.DEFAULT_BOLD);
         lyrCard.addView(lyricCurrView);
 
         lyricWindowView = new TextView(this);
         lyricWindowView.setText("");
-        lyricWindowView.setTextColor(0xFF94A3B8);
         lyricWindowView.setTextSize(12f);
         lyricWindowView.setPadding(0, dp(4), 0, 0);
+        trackedMutedTexts.add(lyricWindowView);
         lyrCard.addView(lyricWindowView);
         col.addView(lyrCard);
 
@@ -445,17 +669,17 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         col.setPadding(dp(14), dp(12), dp(14), dp(14));
         sv.addView(col);
 
-        // Speed & Pitch
         LinearLayout spCard = makeCard();
         spCard.addView(makeSectionHeading("Speed & Pitch"));
         speedLabel = new TextView(this);
         speedLabel.setText("Speed: 1.00x");
-        speedLabel.setTextColor(0xFFF1F5F9);
+        trackedPrimaryTexts.add(speedLabel);
         spCard.addView(speedLabel);
 
         speedBar = new SeekBar(this);
-        speedBar.setMax(55); // 0.25 .. 3.00 in 0.05 steps
+        speedBar.setMax(55);
         speedBar.setProgress(15);
+        trackedSeekBars.add(speedBar);
         speedBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar sb, int p, boolean fromUser) {
                 if (fromUser) speedLabel.setText(String.format("Speed: %.2fx", 0.25 + p * 0.05));
@@ -479,8 +703,8 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
 
         pitchLabel = new TextView(this);
         pitchLabel.setText("Pitch: +0.0 st");
-        pitchLabel.setTextColor(0xFFCBD5E1);
         pitchLabel.setPadding(0, dp(8), 0, dp(2));
+        trackedMutedTexts.add(pitchLabel);
         spCard.addView(pitchLabel);
 
         LinearLayout pitchRow = makeRow();
@@ -491,12 +715,10 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         spCard.addView(pitchRow);
         col.addView(spCard);
 
-        // DSP Presets & 3-Band EQ
         LinearLayout dspCard = makeCard();
         dspCard.addView(makeSectionHeading("DSP Presets & 3-Band EQ"));
         dspSummaryView = new TextView(this);
         dspSummaryView.setText("Active Preset: Flat");
-        dspSummaryView.setTextColor(accentColor);
         dspCard.addView(dspSummaryView);
 
         String[][] presets = {{"flat", "Flat"}, {"bass", "Bass+"}, {"vocal", "Vocal"}, {"warm", "Warm"}, {"rock", "Rock"}, {"8d", "8D"}};
@@ -512,8 +734,8 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
 
         eqLabel = new TextView(this);
         eqLabel.setText("Bass 0 dB · Mid 0 dB · Treble 0 dB");
-        eqLabel.setTextColor(0xFFCBD5E1);
         eqLabel.setPadding(0, dp(8), 0, dp(4));
+        trackedMutedTexts.add(eqLabel);
         dspCard.addView(eqLabel);
 
         LinearLayout eqRow = makeRow();
@@ -532,12 +754,11 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         dspCard.addView(sp8d);
         col.addView(dspCard);
 
-        // A-B Loop & Sleep Timer
         LinearLayout extraCard = makeCard();
         extraCard.addView(makeSectionHeading("A-B Loop & Sleep Timer"));
         abLabel = new TextView(this);
         abLabel.setText("A-B Loop: -- / --");
-        abLabel.setTextColor(0xFFCBD5E1);
+        trackedMutedTexts.add(abLabel);
         extraCard.addView(abLabel);
         LinearLayout abRow = makeRow();
         addWeightedBtn(abRow, makeBtn("Mark A", false, v -> sendAb("mark_a")), 1f);
@@ -548,8 +769,8 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
 
         sleepLabel = new TextView(this);
         sleepLabel.setText("Sleep Timer: Off");
-        sleepLabel.setTextColor(0xFFCBD5E1);
         sleepLabel.setPadding(0, dp(8), 0, dp(2));
+        trackedMutedTexts.add(sleepLabel);
         extraCard.addView(sleepLabel);
         LinearLayout slpRow = makeRow();
         addWeightedBtn(slpRow, makeBtn("Off", false, v -> sendSleep(null)), 1f);
@@ -568,13 +789,8 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         root.setPadding(dp(12), dp(10), dp(12), dp(10));
 
         LinearLayout searchRow = makeRow();
-        searchInput = new EditText(this);
-        searchInput.setHint("Search PC library...");
-        searchInput.setHintTextColor(0xFF64748B);
-        searchInput.setTextColor(0xFFF8FAFC);
-        searchInput.setBackground(roundedBg(0xFF171D2D, 0x33FFFFFF, 10));
-        searchInput.setPadding(dp(10), dp(8), dp(10), dp(8));
-        searchInput.setSingleLine(true);
+        searchInput = makeInput("Search PC library...", InputType.TYPE_CLASS_TEXT);
+        ((LinearLayout.LayoutParams) searchInput.getLayoutParams()).bottomMargin = 0;
         searchRow.addView(searchInput, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         Button searchBtn = makeBtn("Search", true, v -> {
             libMode = 0;
@@ -608,12 +824,10 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         col.setPadding(dp(14), dp(12), dp(14), dp(14));
         sv.addView(col);
 
-        // Source Switcher
         LinearLayout srcCard = makeCard();
         srcCard.addView(makeSectionHeading("Active Audio Source (PC vs Reverse Bluetooth)"));
         audioSourceSummary = new TextView(this);
         audioSourceSummary.setText("Active Source: PC (tntron)");
-        audioSourceSummary.setTextColor(accentColor);
         audioSourceSummary.setTextSize(14f);
         audioSourceSummary.setTypeface(Typeface.DEFAULT_BOLD);
         srcCard.addView(audioSourceSummary);
@@ -625,20 +839,19 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         srcCard.addView(srcRow);
         col.addView(srcCard);
 
-        // Android AVRCP Control + Reverse BT Volume
         LinearLayout avCard = makeCard();
         avCard.addView(makeSectionHeading("Bluetooth Phone Playback (AVRCP)"));
         avrcpTitleView = new TextView(this);
         avrcpTitleView.setText("No active Bluetooth media player");
-        avrcpTitleView.setTextColor(0xFFF8FAFC);
         avrcpTitleView.setTextSize(14f);
         avrcpTitleView.setTypeface(Typeface.DEFAULT_BOLD);
+        trackedPrimaryTexts.add(avrcpTitleView);
         avCard.addView(avrcpTitleView);
 
         avrcpSubView = new TextView(this);
-        avrcpSubView.setText("Pair your phone with PC Bluetooth to stream & control");
-        avrcpSubView.setTextColor(0xFF94A3B8);
+        avrcpSubView.setText("Pair your device with PC Bluetooth to stream & control");
         avrcpSubView.setTextSize(12f);
+        trackedMutedTexts.add(avrcpSubView);
         avCard.addView(avrcpSubView);
 
         LinearLayout avRow = makeRow();
@@ -650,13 +863,14 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
 
         btVolLabel = new TextView(this);
         btVolLabel.setText("Reverse BT Volume (Phone -> PC): 100%");
-        btVolLabel.setTextColor(0xFFCBD5E1);
         btVolLabel.setPadding(0, dp(8), 0, dp(2));
+        trackedMutedTexts.add(btVolLabel);
         avCard.addView(btVolLabel);
 
         btVolBar = new SeekBar(this);
         btVolBar.setMax(150);
         btVolBar.setProgress(100);
+        trackedSeekBars.add(btVolBar);
         btVolBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar sb, int p, boolean fromUser) {
                 if (fromUser) btVolLabel.setText("Reverse BT Volume (Phone -> PC): " + p + "%");
@@ -670,7 +884,6 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         avCard.addView(btVolBar);
         col.addView(avCard);
 
-        // PipeWire Sinks
         LinearLayout sinkCard = makeCard();
         sinkCard.addView(makeSectionHeading("PC Audio Output Devices (PipeWire)"));
         sinksContainer = new LinearLayout(this);
@@ -678,7 +891,6 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         sinkCard.addView(sinksContainer);
         col.addView(sinkCard);
 
-        // Bluetooth Devices
         LinearLayout btCard = makeCard();
         btCard.addView(makeSectionHeading("PC Bluetooth Devices (Reverse A2DP)"));
         btDevicesContainer = new LinearLayout(this);
@@ -696,16 +908,29 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         col.setPadding(dp(14), dp(12), dp(14), dp(14));
         sv.addView(col);
 
-        // Connection setup
-        LinearLayout connCard = makeCard();
-        connCard.addView(makeSectionHeading("Connect to tntron on PC"));
+        // Bluetooth Link Card (Recommended — zero firewall / zero IP needed)
+        LinearLayout btLinkCard = makeCard();
+        LinearLayout btHead = makeRow();
+        TextView btHeading = makeSectionHeading("Bluetooth Link (RFCOMM ch 22)");
+        btHead.addView(btHeading, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        btHead.addView(makeBtn("Refresh", false, v -> refreshPairedBluetoothDevices()));
+        btLinkCard.addView(btHead);
+
         connDetailView = new TextView(this);
-        connDetailView.setText("Enable 'Android & Bluetooth Link' in tntron to view PC LAN IP & port (26263).");
-        connDetailView.setTextColor(0xFF94A3B8);
+        connDetailView.setText("Tap your paired PC below to connect directly over Bluetooth (no Wi-Fi/firewall needed).");
         connDetailView.setTextSize(12f);
         connDetailView.setPadding(0, 0, 0, dp(8));
-        connCard.addView(connDetailView);
+        trackedMutedTexts.add(connDetailView);
+        btLinkCard.addView(connDetailView);
 
+        pairedPcContainer = new LinearLayout(this);
+        pairedPcContainer.setOrientation(LinearLayout.VERTICAL);
+        btLinkCard.addView(pairedPcContainer);
+        col.addView(btLinkCard);
+
+        // Wi-Fi LAN / USB TCP fallback
+        LinearLayout connCard = makeCard();
+        connCard.addView(makeSectionHeading("Wi-Fi LAN / USB TCP (Optional)"));
         hostInput = makeInput("PC IP Address (e.g. 192.168.1.42 or 127.0.0.1)", InputType.TYPE_CLASS_TEXT);
         portInput = makeInput("Port (26263)", InputType.TYPE_CLASS_NUMBER);
         tokenInput = makeInput("Optional Pairing PIN / Token", InputType.TYPE_CLASS_TEXT);
@@ -714,11 +939,11 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         connCard.addView(tokenInput);
 
         LinearLayout btnRow = makeRow();
-        addWeightedBtn(btnRow, makeBtn("Connect", true, v -> applyConnection()), 1.4f);
+        addWeightedBtn(btnRow, makeBtn("Connect TCP", false, v -> applyTcpConnection()), 1.4f);
         addWeightedBtn(btnRow, makeBtn("USB (127.0.0.1)", false, v -> {
             hostInput.setText("127.0.0.1");
             portInput.setText("26263");
-            applyConnection();
+            applyTcpConnection();
         }), 1.2f);
         connCard.addView(btnRow);
         col.addView(connCard);
@@ -726,7 +951,7 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         // Themes
         LinearLayout themeCard = makeCard();
         LinearLayout thHead = makeRow();
-        TextView thLbl = makeSectionHeading("tntron Themes");
+        TextView thLbl = makeSectionHeading("Host Themes (Live Sync)");
         thHead.addView(thLbl, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         thHead.addView(makeBtn("Toggle Hide-UI", false, v -> client.sendCmd("toggle_hide_ui")));
         themeCard.addView(thHead);
@@ -737,7 +962,7 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
 
         // Extensions
         LinearLayout extCard = makeCard();
-        extCard.addView(makeSectionHeading("tntron Extensions"));
+        extCard.addView(makeSectionHeading("Host Extensions"));
         extensionsContainer = new LinearLayout(this);
         extensionsContainer.setOrientation(LinearLayout.VERTICAL);
         extCard.addView(extensionsContainer);
@@ -749,35 +974,36 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
     private EditText makeInput(String hint, int inputType) {
         EditText et = new EditText(this);
         et.setHint(hint);
-        et.setHintTextColor(0xFF64748B);
-        et.setTextColor(0xFFF8FAFC);
         et.setInputType(inputType);
         et.setSingleLine(true);
-        et.setBackground(roundedBg(0xFF1A2233, 0x33FFFFFF, 10));
         et.setPadding(dp(12), dp(10), dp(12), dp(10));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.bottomMargin = dp(8);
         et.setLayoutParams(lp);
+        trackedInputs.add(et);
         return et;
     }
 
-    private void applyConnection() {
+    private void applyTcpConnection() {
         String h = hostInput.getText().toString().trim();
         if (h.isEmpty()) h = "127.0.0.1";
         int p = 26263;
         try { p = Integer.parseInt(portInput.getText().toString().trim()); } catch (Exception ignored) {}
         String tok = tokenInput.getText().toString().trim();
-        prefs.edit().putString("host", h).putInt("port", p).putString("token", tok).apply();
+        prefs.edit().putString("mode", "tcp").putString("host", h).putInt("port", p).putString("token", tok).apply();
         client.configureAndConnect(h, p, tok);
-        Toast.makeText(this, "Connecting to " + h + ":" + p, Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, "TCP connecting to " + h + ":" + p, Toast.LENGTH_SHORT).show();
     }
 
     @Override
     public void onConnectionChanged(boolean connected, String message) {
-        headerStatusPill.setText(connected ? "● Connected" : "○ Offline");
-        headerStatusPill.setTextColor(connected ? 0xFF4ADE80 : 0xFFF87171);
+        headerStatusPill.setText(connected
+                ? (client.getMode() == TntronRemoteClient.Mode.BLUETOOTH ? "● BT Linked" : "● TCP Linked")
+                : "○ Offline");
+        headerStatusPill.setTextColor(connected ? uiStyle.accent : 0xFFF87171);
         if (connDetailView != null) connDetailView.setText(message);
+        refreshPairedBluetoothDevices();
         if (connected) {
             refreshAndroidStatus();
             refreshThemes();
@@ -788,8 +1014,16 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
     @Override
     public void onStatus(JSONObject st) {
         lastStatus = st;
-        accentColor = ThemeColors.resolveAccent(st.optString("active_theme", "openify"));
-        headerBrand.setTextColor(accentColor);
+
+        // Live sync full host theme + button pack!
+        JSONObject styleObj = st.optJSONObject("ui_style");
+        if (styleObj != null) {
+            String fp = styleObj.toString();
+            if (!fp.equals(lastStyleFingerprint)) {
+                lastStyleFingerprint = fp;
+                applyHostUiStyle(HostUiStyle.fromJson(styleObj));
+            }
+        }
 
         boolean playing = "playing".equalsIgnoreCase(st.optString("state", "stopped"));
         String title = st.optString("title", "No Active Track");
@@ -811,9 +1045,7 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         if (meta.length() > 0) meta.append(" · ");
         meta.append(String.format("%.2fx · %s", speed, st.optString("dsp_preset", "Flat")));
         metaView.setText(meta.toString());
-        metaView.setTextColor(accentColor);
 
-        // Spectrum
         float[] bands = new float[16];
         JSONArray bArr = st.optJSONArray("bands");
         if (bArr != null) {
@@ -821,9 +1053,8 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
                 bands[i] = (float) bArr.optDouble(i, 0.0);
             }
         }
-        spectrumView.updateSpectrum(bands, accentColor, playing);
+        spectrumView.updateSpectrum(bands, uiStyle.accent, playing);
 
-        // Progress
         double pos = st.optDouble("position", 0.0);
         double dur = st.optDouble("duration", 0.0);
         if (!userSeeking) {
@@ -833,7 +1064,6 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         }
 
         playPauseBtn.setText(playing ? "⏸ Pause" : "▶ Play");
-        playPauseBtn.setBackground(roundedBg(accentColor, 0, 10));
         shuffleBtn.setText("🔀 " + (st.optBoolean("shuffle", false) ? "ON" : "Off"));
         loopBtn.setText("🔁 " + st.optString("loop_mode", "All"));
         favBtn.setText(st.optBoolean("is_favorite", false) ? "♥ Fav" : "♡ Fav");
@@ -845,10 +1075,9 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
         }
         muteBtn.setText(st.optBoolean("muted", false) ? "Unmute" : "Mute");
 
-        // Lyrics
         String currLyric = st.optString("lyric", "");
         lyricCurrView.setText(currLyric.isEmpty() ? "No synced lyrics for current track" : currLyric);
-        lyricCurrView.setTextColor(currLyric.isEmpty() ? 0xFF64748B : accentColor);
+        lyricCurrView.setTextColor(currLyric.isEmpty() ? uiStyle.muted : uiStyle.accent);
         JSONArray lw = st.optJSONArray("lyrics_window");
         if (lw != null && lw.length() > 0) {
             StringBuilder sb = new StringBuilder();
@@ -861,7 +1090,6 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
             lyricWindowView.setText("");
         }
 
-        // DSP labels
         if (!userSpeedDragging) {
             speedLabel.setText(String.format("Speed: %.2fx", speed));
             speedBar.setProgress(Math.max(0, Math.min(55, (int) Math.round((speed - 0.25) / 0.05))));
@@ -879,7 +1107,6 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
                 ? "Sleep Timer: Off"
                 : ("Sleep Timer: " + ThemeColors.formatTime(st.optDouble("sleep_remaining_sec")) + " left"));
 
-        // Fetch cover art on track change
         if (!trackPath.equals(lastCoverTrackPath)) {
             lastCoverTrackPath = trackPath;
             if (!trackPath.isEmpty()) {
@@ -964,10 +1191,11 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
 
     private void renderLibraryList() {
         libraryListContainer.removeAllViews();
+        int rowStroke = uiStyle.isLight ? 0x18000000 : 0x18FFFFFF;
         if (libMode == 0) {
             JSONArray tracks = lastLibrary.optJSONArray("tracks");
             if (tracks == null || tracks.length() == 0) {
-                libraryListContainer.addView(makeSectionHeading("No tracks found"));
+                libraryListContainer.addView(makeMutedLabel("No tracks found."));
                 return;
             }
             for (int i = 0; i < tracks.length(); i++) {
@@ -975,34 +1203,33 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
                 if (t == null) continue;
                 String path = t.optString("path", "");
                 LinearLayout row = makeRow();
-                row.setBackground(roundedBg(0xFF131826, 0x18FFFFFF, 10));
+                row.setBackground(roundedBg(uiStyle.card, rowStroke, 10));
                 row.setPadding(dp(10), dp(8), dp(8), dp(8));
 
                 LinearLayout info = new LinearLayout(this);
                 info.setOrientation(LinearLayout.VERTICAL);
                 TextView tv1 = new TextView(this);
                 tv1.setText(t.optString("title", "Track"));
-                tv1.setTextColor(0xFFF8FAFC);
+                tv1.setTextColor(uiStyle.text);
                 tv1.setTextSize(13f);
                 tv1.setMaxLines(1);
                 tv1.setEllipsize(TextUtils.TruncateAt.END);
                 TextView tv2 = new TextView(this);
                 tv2.setText(t.optString("artist", "") + " · " + ThemeColors.formatTime(t.optDouble("duration", 0)));
-                tv2.setTextColor(0xFF94A3B8);
+                tv2.setTextColor(uiStyle.muted);
                 tv2.setTextSize(11f);
                 tv2.setMaxLines(1);
                 info.addView(tv1);
                 info.addView(tv2);
                 info.setOnClickListener(v -> client.sendWith("play_path", o -> { try { o.put("path", path); } catch (Exception ignored) {} }, null));
                 row.addView(info, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-                row.addView(makeBtn("+Q", false, v -> client.sendWith("add_to_queue", o -> { try { o.put("path", path); } catch (Exception ignored) {} }, null)));
+                row.addView(makeDynamicBtn("+Q", false, v -> client.sendWith("add_to_queue", o -> { try { o.put("path", path); } catch (Exception ignored) {} }, null)));
                 libraryListContainer.addView(row);
             }
         } else if (libMode == 1) {
             JSONArray folders = lastLibrary.optJSONArray("folders");
             if (folders == null || folders.length() == 0) {
-                libraryListContainer.addView(makeSectionHeading("No folders found"));
+                libraryListContainer.addView(makeMutedLabel("No folders found."));
                 return;
             }
             for (int i = 0; i < folders.length(); i++) {
@@ -1010,42 +1237,40 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
                 if (f == null) continue;
                 String path = f.optString("path", "");
                 LinearLayout row = makeRow();
-                row.setBackground(roundedBg(0xFF131826, 0x18FFFFFF, 10));
+                row.setBackground(roundedBg(uiStyle.card, rowStroke, 10));
                 row.setPadding(dp(10), dp(8), dp(8), dp(8));
                 TextView tv = new TextView(this);
                 tv.setText("📁 " + f.optString("name", "Folder") + " (" + f.optInt("track_count", 0) + ")");
-                tv.setTextColor(0xFFF8FAFC);
+                tv.setTextColor(uiStyle.text);
                 tv.setTextSize(13f);
                 row.addView(tv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-                row.addView(makeBtn("▶ Play", true, v -> client.sendWith("play_folder", o -> { try { o.put("path", path); o.put("shuffle", false); } catch (Exception ignored) {} }, null)));
-                row.addView(makeBtn("🔀", false, v -> client.sendWith("play_folder", o -> { try { o.put("path", path); o.put("shuffle", true); } catch (Exception ignored) {} }, null)));
+                row.addView(makeDynamicBtn("▶ Play", true, v -> client.sendWith("play_folder", o -> { try { o.put("path", path); o.put("shuffle", false); } catch (Exception ignored) {} }, null)));
+                row.addView(makeDynamicBtn("🔀", false, v -> client.sendWith("play_folder", o -> { try { o.put("path", path); o.put("shuffle", true); } catch (Exception ignored) {} }, null)));
                 libraryListContainer.addView(row);
             }
         } else {
-            libraryListContainer.addView(makeBtn("Clear Queue", false, v -> client.sendCmd("clear_queue")));
-            JSONArray q = lastStatus.optJSONArray("queue_items");
-            JSONArray pl = lastStatus.optJSONArray("playlist_items");
-            addQueueItems(q, true);
-            addQueueItems(pl, false);
+            libraryListContainer.addView(makeDynamicBtn("Clear Queue", false, v -> client.sendCmd("clear_queue")));
+            addQueueItems(lastStatus.optJSONArray("queue_items"), true, rowStroke);
+            addQueueItems(lastStatus.optJSONArray("playlist_items"), false, rowStroke);
         }
     }
 
-    private void addQueueItems(JSONArray arr, boolean queued) {
+    private void addQueueItems(JSONArray arr, boolean queued, int rowStroke) {
         if (arr == null) return;
         for (int i = 0; i < arr.length(); i++) {
             JSONObject item = arr.optJSONObject(i);
             if (item == null) continue;
             int idx = item.optInt("playlist_index", i);
             LinearLayout row = makeRow();
-            row.setBackground(roundedBg(0xFF131826, 0x18FFFFFF, 10));
+            row.setBackground(roundedBg(uiStyle.card, rowStroke, 10));
             row.setPadding(dp(10), dp(8), dp(8), dp(8));
             TextView tv = new TextView(this);
             String prefix = queued ? "[Q] " : (item.optBoolean("is_current", false) ? "▶ " : "");
             tv.setText(prefix + item.optString("title", ""));
-            tv.setTextColor(item.optBoolean("is_current", false) ? accentColor : 0xFFF8FAFC);
+            tv.setTextColor(item.optBoolean("is_current", false) ? uiStyle.accent : uiStyle.text);
             tv.setTextSize(13f);
             row.addView(tv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-            row.addView(makeBtn("▶", false, v -> client.sendWith(queued ? "play_queue_item" : "play_upcoming",
+            row.addView(makeDynamicBtn("▶", false, v -> client.sendWith(queued ? "play_queue_item" : "play_upcoming",
                     o -> { try { o.put("index", idx); } catch (Exception ignored) {} }, null)));
             libraryListContainer.addView(row);
         }
@@ -1086,7 +1311,7 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
                 String name = s.optString("name", "");
                 String desc = s.optString("description", name);
                 boolean def = s.optBoolean("is_default", false);
-                Button b = makeBtn((def ? "✓ " : "") + (s.optBoolean("is_bluetooth", false) ? "[BT] " : "") + desc,
+                Button b = makeDynamicBtn((def ? "✓ " : "") + (s.optBoolean("is_bluetooth", false) ? "[BT] " : "") + desc,
                         def, v -> client.sendWith("set_audio_sink", o -> { try { o.put("sink_name", name); } catch (Exception ignored) {} },
                                 r -> refreshAndroidStatus()));
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -1094,7 +1319,7 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
                 sinksContainer.addView(b, lp);
             }
         } else {
-            sinksContainer.addView(makeSectionHeading("No PipeWire sinks reported"));
+            sinksContainer.addView(makeMutedLabel("No PipeWire sinks reported."));
         }
 
         btDevicesContainer.removeAllViews();
@@ -1109,21 +1334,21 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
                 LinearLayout row = makeRow();
                 TextView tv = new TextView(this);
                 tv.setText((conn ? "● " : "○ ") + name);
-                tv.setTextColor(conn ? accentColor : 0xFFCBD5E1);
+                tv.setTextColor(conn ? uiStyle.accent : uiStyle.text);
                 tv.setTextSize(13f);
                 row.addView(tv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-                row.addView(makeBtn(conn ? "Disconnect" : "Connect", false, v ->
+                row.addView(makeDynamicBtn(conn ? "Disconnect" : "Connect", false, v ->
                         client.sendWith(conn ? "bt_disconnect" : "bt_connect",
                                 o -> { try { o.put("device_path", path); } catch (Exception ignored) {} },
                                 r -> refreshAndroidStatus())));
-                row.addView(makeBtn("Stream -> PC", true, v ->
+                row.addView(makeDynamicBtn("Stream -> PC", true, v ->
                         client.sendWith("bt_reverse_audio",
                                 o -> { try { o.put("device_path", path); } catch (Exception ignored) {} },
                                 r -> refreshAndroidStatus())));
                 btDevicesContainer.addView(row);
             }
         } else {
-            btDevicesContainer.addView(makeSectionHeading("No paired Bluetooth devices"));
+            btDevicesContainer.addView(makeMutedLabel("No paired Bluetooth devices."));
         }
     }
 
@@ -1144,7 +1369,7 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
                     String slug = th.optString("slug", "openify");
                     String lbl = th.optString("label", slug);
                     boolean active = slug.equalsIgnoreCase(lastStatus.optString("active_theme", ""));
-                    addWeightedBtn(curRow, makeBtn((active ? "✓ " : "") + lbl, active, v ->
+                    addWeightedBtn(curRow, makeDynamicBtn((active ? "✓ " : "") + lbl, active, v ->
                             client.sendWith("set_theme", o -> { try { o.put("slug", slug); } catch (Exception ignored) {} }, null)), 1f);
                 }
             }
@@ -1166,10 +1391,10 @@ public final class MainActivity extends AppCompatActivity implements TntronRemot
                     LinearLayout row = makeRow();
                     TextView tv = new TextView(this);
                     tv.setText(name);
-                    tv.setTextColor(en ? accentColor : 0xFFCBD5E1);
+                    tv.setTextColor(en ? uiStyle.accent : uiStyle.text);
                     tv.setTextSize(13f);
                     row.addView(tv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-                    row.addView(makeBtn(en ? "ON" : "OFF", en, v ->
+                    row.addView(makeDynamicBtn(en ? "ON" : "OFF", en, v ->
                             client.sendWith("toggle_extension", o -> { try { o.put("id", id); } catch (Exception ignored) {} },
                                     r -> refreshExtensions())));
                     extensionsContainer.addView(row);

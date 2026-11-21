@@ -1,9 +1,13 @@
 use serde::{Deserialize, Serialize};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
+use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::unix::AsyncFd;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
@@ -11,7 +15,7 @@ use crate::android::{AndroidBridgeHandle, AndroidBridgeStatus};
 use crate::clock::PlayState;
 use crate::engine::{CoreCommand, CoreState};
 use crate::library::format_mmss;
-use crate::storage::MinecraftLinkConfig;
+use crate::storage::{ButtonPackConfig, MinecraftLinkConfig};
 
 pub fn default_socket_path() -> PathBuf {
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
@@ -146,6 +150,183 @@ pub const BUILTIN_THEME_ITEMS: &[(&str, &str, &str)] = &[
     ("turk", "Crimson Moon", "#e30a17"),
     ("clouds", "Clouds", "#38bdf8"),
 ];
+
+pub const ANDROID_BT_RFCOMM_CHANNEL: u8 = 22;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct HostUiStyle {
+    pub theme_slug: String,
+    pub theme_label: String,
+    pub is_light: bool,
+    pub base: String,
+    pub sidebar: String,
+    pub surface: String,
+    pub card: String,
+    pub card_hover: String,
+    pub text: String,
+    pub muted: String,
+    pub accent: String,
+    pub accent_fg: String,
+    pub logo_color: String,
+    pub button_pack: ButtonPackConfig,
+    pub reactive_enabled: bool,
+    pub hue_loop: bool,
+    pub bass_glow: bool,
+    pub eq_style: String,
+    pub transparency_enabled: bool,
+    pub card_alpha: f32,
+}
+
+impl Default for HostUiStyle {
+    fn default() -> Self {
+        Self {
+            theme_slug: "openify".into(),
+            theme_label: "Openify".into(),
+            is_light: false,
+            base: "#000000".into(),
+            sidebar: "#121212".into(),
+            surface: "#121212".into(),
+            card: "#181818".into(),
+            card_hover: "#282828".into(),
+            text: "#ffffff".into(),
+            muted: "#b3b3b3".into(),
+            accent: "#1db954".into(),
+            accent_fg: "#000000".into(),
+            logo_color: "#1db954".into(),
+            button_pack: ButtonPackConfig::default(),
+            reactive_enabled: false,
+            hue_loop: true,
+            bass_glow: true,
+            eq_style: "bars".into(),
+            transparency_enabled: false,
+            card_alpha: 1.0,
+        }
+    }
+}
+
+impl HostUiStyle {
+    pub fn from_state(state: &CoreState) -> Self {
+        let slug = state.persisted.active_theme.as_str();
+        let mut style = if let Some(et) = state.ext_host.themes.iter().find(|t| t.slug == slug) {
+            Self {
+                theme_slug: et.slug.clone(),
+                theme_label: et.label.clone(),
+                is_light: false,
+                base: et.base.clone(),
+                sidebar: et.sidebar.clone(),
+                surface: et.main.clone(),
+                card: et.card.clone(),
+                card_hover: et.card_hover.clone(),
+                text: et.text.clone(),
+                muted: et.text_sub.clone(),
+                accent: et.accent.clone(),
+                accent_fg: "#000000".into(),
+                logo_color: et.logo_color.clone().unwrap_or_else(|| et.accent.clone()),
+                ..Default::default()
+            }
+        } else {
+            Self::builtin(slug)
+        };
+
+        if let Some(custom_hex) = &state.persisted.logo.custom_hex {
+            if state.persisted.logo.mode == "custom_color" && !custom_hex.trim().is_empty() {
+                style.logo_color = custom_hex.clone();
+            }
+        }
+        style.button_pack = state.persisted.button_pack.clone();
+        style.reactive_enabled = state.persisted.reactive_ui.enabled;
+        style.hue_loop = state.persisted.reactive_ui.hue_loop;
+        style.bass_glow = state.persisted.reactive_ui.bass_glow;
+        style.eq_style = state.persisted.reactive_ui.eq_style.clone();
+        style.transparency_enabled = state.persisted.transparency.enabled;
+        style.card_alpha = state.persisted.transparency.card_alpha;
+        style
+    }
+
+    fn builtin(slug: &str) -> Self {
+        match slug {
+            "dark" => Self {
+                theme_slug: "dark".into(), theme_label: "Pure Dark".into(), is_light: false,
+                base: "#0a0a0a".into(), sidebar: "#141414".into(), surface: "#141414".into(),
+                card: "#1a1a1a".into(), card_hover: "#262626".into(), text: "#ffffff".into(),
+                muted: "#888888".into(), accent: "#ffffff".into(), accent_fg: "#000000".into(),
+                logo_color: "#ffffff".into(), ..Default::default()
+            },
+            "light" => Self {
+                theme_slug: "light".into(), theme_label: "Daylight".into(), is_light: true,
+                base: "#f4f4f6".into(), sidebar: "#ffffff".into(), surface: "#f9f9fb".into(),
+                card: "#eaecef".into(), card_hover: "#dfe2e6".into(), text: "#18181b".into(),
+                muted: "#52525b".into(), accent: "#18181b".into(), accent_fg: "#ffffff".into(),
+                logo_color: "#18181b".into(), ..Default::default()
+            },
+            "blue" => Self {
+                theme_slug: "blue".into(), theme_label: "Deep Blue".into(), is_light: false,
+                base: "#050a14".into(), sidebar: "#0b1528".into(), surface: "#0f1d36".into(),
+                card: "#172a4f".into(), card_hover: "#1f396b".into(), text: "#f0f7ff".into(),
+                muted: "#94a3b8".into(), accent: "#3b82f6".into(), accent_fg: "#ffffff".into(),
+                logo_color: "#60a5fa".into(), ..Default::default()
+            },
+            "purple" => Self {
+                theme_slug: "purple".into(), theme_label: "Amethyst".into(), is_light: false,
+                base: "#0d0714".into(), sidebar: "#180d26".into(), surface: "#211233".into(),
+                card: "#2d1a45".into(), card_hover: "#3b2259".into(), text: "#faf5ff".into(),
+                muted: "#a78bfa".into(), accent: "#a855f7".into(), accent_fg: "#ffffff".into(),
+                logo_color: "#c084fc".into(), ..Default::default()
+            },
+            "red" => Self {
+                theme_slug: "red".into(), theme_label: "Crimson".into(), is_light: false,
+                base: "#140505".into(), sidebar: "#240a0a".into(), surface: "#2e0e0e".into(),
+                card: "#421515".into(), card_hover: "#571d1d".into(), text: "#fff5f5".into(),
+                muted: "#f87171".into(), accent: "#ef4444".into(), accent_fg: "#ffffff".into(),
+                logo_color: "#f87171".into(), ..Default::default()
+            },
+            "gold" => Self {
+                theme_slug: "gold".into(), theme_label: "Gilded".into(), is_light: false,
+                base: "#120e02".into(), sidebar: "#1f1804".into(), surface: "#292006".into(),
+                card: "#3a2d09".into(), card_hover: "#4d3c0e".into(), text: "#fefce8".into(),
+                muted: "#facc15".into(), accent: "#eab308".into(), accent_fg: "#000000".into(),
+                logo_color: "#fbbf24".into(), ..Default::default()
+            },
+            "cyberpunk" => Self {
+                theme_slug: "cyberpunk".into(), theme_label: "Cyberpunk".into(), is_light: false,
+                base: "#080412".into(), sidebar: "#120926".into(), surface: "#180c33".into(),
+                card: "#24124d".into(), card_hover: "#311869".into(), text: "#00f0ff".into(),
+                muted: "#c026d3".into(), accent: "#ff007f".into(), accent_fg: "#ffffff".into(),
+                logo_color: "#00f0ff".into(), ..Default::default()
+            },
+            "terminal" => Self {
+                theme_slug: "terminal".into(), theme_label: "Terminal".into(), is_light: false,
+                base: "#000500".into(), sidebar: "#001000".into(), surface: "#001400".into(),
+                card: "#002200".into(), card_hover: "#003300".into(), text: "#00ff00".into(),
+                muted: "#00aa00".into(), accent: "#00ff00".into(), accent_fg: "#000000".into(),
+                logo_color: "#00ff00".into(), ..Default::default()
+            },
+            "pharoh" => Self {
+                theme_slug: "pharoh".into(), theme_label: "Pharoh".into(), is_light: false,
+                base: "#1a1409".into(), sidebar: "#261d0d".into(), surface: "#332712".into(),
+                card: "#473619".into(), card_hover: "#5c4621".into(), text: "#fae8b4".into(),
+                muted: "#c2a661".into(), accent: "#d4af37".into(), accent_fg: "#000000".into(),
+                logo_color: "#d4af37".into(), ..Default::default()
+            },
+            "turk" => Self {
+                theme_slug: "turk".into(), theme_label: "Crimson Moon".into(), is_light: false,
+                base: "#140304".into(), sidebar: "#240608".into(), surface: "#30090c".into(),
+                card: "#471015".into(), card_hover: "#5e161d".into(), text: "#ffffff".into(),
+                muted: "#fca5a5".into(), accent: "#e30a17".into(), accent_fg: "#ffffff".into(),
+                logo_color: "#e30a17".into(), ..Default::default()
+            },
+            "clouds" => Self {
+                theme_slug: "clouds".into(), theme_label: "Clouds".into(), is_light: true,
+                base: "#e8f1f8".into(), sidebar: "#ffffff".into(), surface: "#f2f7fc".into(),
+                card: "#d9e8f5".into(), card_hover: "#c6dcf0".into(), text: "#1e3a5f".into(),
+                muted: "#5a7c9e".into(), accent: "#38bdf8".into(), accent_fg: "#000000".into(),
+                logo_color: "#0284c7".into(), ..Default::default()
+            },
+            _ => Self::default(),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct McBridgeHandle {
@@ -347,6 +528,8 @@ pub struct TntronStatus {
     pub mc_link_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mc_notice: Option<McNotice>,
+    #[serde(default)]
+    pub ui_style: HostUiStyle,
 }
 
 impl TntronStatus {
@@ -539,6 +722,7 @@ impl TntronStatus {
             current_dir: state.current_dir.display().to_string(),
             mc_link_enabled: state.persisted.minecraft_link.enabled,
             mc_notice: state.mc_bridge.latest_notice(),
+            ui_style: HostUiStyle::from_state(state),
         }
     }
 }
@@ -906,6 +1090,355 @@ pub async fn run_android_tcp_server(
             }
         }
     }
+}
+
+pub async fn run_android_bt_rfcomm_server(
+    cmd_tx: mpsc::Sender<CoreCommand>,
+    status_rx: watch::Receiver<TntronStatus>,
+    broadcast_tx: broadcast::Sender<TntronStatus>,
+    mc_bridge: McBridgeHandle,
+    android_bridge: AndroidBridgeHandle,
+) {
+    let mut cfg_rx = android_bridge.subscribe_config();
+
+    loop {
+        let cfg = cfg_rx.borrow().clone();
+        if !cfg.enabled {
+            if cfg_rx.changed().await.is_err() {
+                return;
+            }
+            continue;
+        }
+
+        let listener = match bind_rfcomm_listener(ANDROID_BT_RFCOMM_CHANNEL) {
+            Ok(fd) => fd,
+            Err(e) => {
+                tracing::warn!("Bluetooth RFCOMM bind failed on ch {}: {e}", ANDROID_BT_RFCOMM_CHANNEL);
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    res = cfg_rx.changed() => {
+                        if res.is_err() {
+                            return;
+                        }
+                    }
+                }
+                continue;
+            }
+        };
+        tracing::info!("Android Link Bluetooth RFCOMM listening on channel {}", ANDROID_BT_RFCOMM_CHANNEL);
+
+        loop {
+            tokio::select! {
+                accepted = accept_rfcomm(&listener) => {
+                    match accepted {
+                        Ok(client_fd) => {
+                            let cmd_tx = cmd_tx.clone();
+                            let status_rx = status_rx.clone();
+                            let sub_rx = broadcast_tx.subscribe();
+                            let mcb = mc_bridge.clone();
+                            let ab = android_bridge.clone();
+                            tokio::spawn(async move {
+                                ab.inc_clients();
+                                if let Ok(stream) = RfcommStream::new(client_fd) {
+                                    let (read_half, write_half) = tokio::io::split(stream);
+                                    let _ = handle_multiplexed_client(
+                                        read_half,
+                                        write_half,
+                                        cmd_tx,
+                                        status_rx,
+                                        sub_rx,
+                                        mcb,
+                                    ).await;
+                                }
+                                ab.dec_clients();
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!("Bluetooth RFCOMM accept error: {e}");
+                            break;
+                        }
+                    }
+                }
+                res = cfg_rx.changed() => {
+                    if res.is_err() {
+                        return;
+                    }
+                    if !cfg_rx.borrow().enabled {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+const AF_BLUETOOTH: libc::c_int = 31;
+const BTPROTO_RFCOMM: libc::c_int = 3;
+
+#[repr(C)]
+struct SockAddrRc {
+    rc_family: libc::sa_family_t,
+    rc_bdaddr: [u8; 6],
+    rc_channel: u8,
+}
+
+fn bind_rfcomm_listener(channel: u8) -> std::io::Result<AsyncFd<OwnedFd>> {
+    unsafe {
+        let fd = libc::socket(
+            AF_BLUETOOTH,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            BTPROTO_RFCOMM,
+        );
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let owned = OwnedFd::from_raw_fd(fd);
+        let addr = SockAddrRc {
+            rc_family: AF_BLUETOOTH as libc::sa_family_t,
+            rc_bdaddr: [0u8; 6],
+            rc_channel: channel,
+        };
+        let rc = libc::bind(
+            owned.as_raw_fd(),
+            (&raw const addr).cast::<libc::sockaddr>(),
+            std::mem::size_of::<SockAddrRc>() as libc::socklen_t,
+        );
+        if rc < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::listen(owned.as_raw_fd(), 4) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(AsyncFd::register(owned)?)
+    }
+}
+
+async fn accept_rfcomm(listener: &AsyncFd<OwnedFd>) -> std::io::Result<OwnedFd> {
+    loop {
+        let mut guard = listener.readable().await?;
+        let res = guard.try_io(|inner| unsafe {
+            let mut addr: SockAddrRc = std::mem::zeroed();
+            let mut len = std::mem::size_of::<SockAddrRc>() as libc::socklen_t;
+            let fd = libc::accept4(
+                inner.get_ref().as_raw_fd(),
+                (&raw mut addr).cast::<libc::sockaddr>(),
+                &raw mut len,
+                libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            );
+            if fd < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(OwnedFd::from_raw_fd(fd))
+            }
+        });
+        match res {
+            Ok(result) => return result,
+            Err(_would_block) => continue,
+        }
+    }
+}
+
+struct RfcommStream {
+    inner: AsyncFd<OwnedFd>,
+}
+
+impl RfcommStream {
+    fn new(fd: OwnedFd) -> std::io::Result<Self> {
+        Ok(Self {
+            // SAFETY: `fd` is an `OwnedFd` created by `accept4` with `SOCK_NONBLOCK | SOCK_CLOEXEC`
+            // and exclusively owned by this `AsyncFd` until dropped.
+            inner: unsafe { AsyncFd::register(fd)? },
+        })
+    }
+}
+
+impl AsyncRead for RfcommStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        loop {
+            let mut guard = match self.inner.poll_read_ready(cx) {
+                Poll::Ready(Ok(g)) => g,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            };
+            let unfilled = buf.initialize_unfilled();
+            match guard.try_io(|inner| unsafe {
+                let n = libc::read(
+                    inner.get_ref().as_raw_fd(),
+                    unfilled.as_mut_ptr().cast(),
+                    unfilled.len(),
+                );
+                if n < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(n as usize)
+                }
+            }) {
+                Ok(Ok(n)) => {
+                    buf.advance(n);
+                    return Poll::Ready(Ok(()));
+                }
+                Ok(Err(e)) => return Poll::Ready(Err(e)),
+                Err(_would_block) => continue,
+            }
+        }
+    }
+}
+
+impl AsyncWrite for RfcommStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        loop {
+            let mut guard = match self.inner.poll_write_ready(cx) {
+                Poll::Ready(Ok(g)) => g,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            };
+            match guard.try_io(|inner| unsafe {
+                let n = libc::write(
+                    inner.get_ref().as_raw_fd(),
+                    data.as_ptr().cast(),
+                    data.len(),
+                );
+                if n < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(n as usize)
+                }
+            }) {
+                Ok(res) => return Poll::Ready(res),
+                Err(_would_block) => continue,
+            }
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        unsafe {
+            libc::shutdown(self.inner.get_ref().as_raw_fd(), libc::SHUT_WR);
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// Single-socket multiplexed JSON-lines session (used by Bluetooth RFCOMM):
+/// streams live `TntronStatus` updates while accepting commands & queries on the same connection.
+async fn handle_multiplexed_client<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    read_half: R,
+    mut write_half: W,
+    cmd_tx: mpsc::Sender<CoreCommand>,
+    status_rx: watch::Receiver<TntronStatus>,
+    mut sub_rx: broadcast::Receiver<TntronStatus>,
+    mc_bridge: McBridgeHandle,
+) -> anyhow::Result<()> {
+    let init = { serde_json::to_string(&*status_rx.borrow())? };
+    write_half.write_all(init.as_bytes()).await?;
+    write_half.write_all(b"\n").await?;
+
+    let mut lines = BufReader::new(read_half).lines();
+    loop {
+        tokio::select! {
+            bcast = sub_rx.recv() => {
+                match bcast {
+                    Ok(st) => {
+                        let msg = serde_json::to_string(&st)?;
+                        if write_half.write_all(msg.as_bytes()).await.is_err()
+                            || write_half.write_all(b"\n").await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            line_res = lines.next_line() => {
+                let Some(line) = line_res? else { break; };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let Ok(req) = serde_json::from_str::<IpcCommand>(&line) else {
+                    send_response(
+                        &mut write_half,
+                        &IpcResponse {
+                            ok: false,
+                            error: Some("invalid command JSON".into()),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                    continue;
+                };
+
+                if matches!(req, IpcCommand::Subscribe | IpcCommand::Auth { .. }) {
+                    let st = status_rx.borrow().clone();
+                    send_response(
+                        &mut write_half,
+                        &IpcResponse {
+                            ok: true,
+                            status: Some(st),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
+
+                if let Some(q) = match &req {
+                    IpcCommand::GetLibrary { query, folder, limit } => Some(IpcQueryKind::GetLibrary {
+                        query: query.clone(),
+                        folder: folder.clone(),
+                        limit: *limit,
+                    }),
+                    IpcCommand::GetThemes => Some(IpcQueryKind::GetThemes),
+                    IpcCommand::GetExtensions => Some(IpcQueryKind::GetExtensions),
+                    IpcCommand::GetCover => Some(IpcQueryKind::GetCover),
+                    IpcCommand::GetAndroidStatus => Some(IpcQueryKind::GetAndroidStatus),
+                    _ => None,
+                } {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = cmd_tx
+                        .send(CoreCommand::IpcQuery {
+                            req: q,
+                            reply: Arc::new(std::sync::Mutex::new(Some(tx))),
+                        })
+                        .await;
+                    if let Ok(Ok(resp)) = tokio::time::timeout(Duration::from_secs(2), rx).await {
+                        send_response(&mut write_half, &resp).await?;
+                    }
+                    continue;
+                }
+
+                if !matches!(req, IpcCommand::Status) {
+                    mc_bridge.record_command();
+                }
+                let current_track_path = status_rx.borrow().track_path.clone();
+                for c in translate_ipc_command(req, &current_track_path) {
+                    let _ = cmd_tx.send(c).await;
+                }
+                let st = status_rx.borrow().clone();
+                send_response(
+                    &mut write_half,
+                    &IpcResponse {
+                        ok: true,
+                        status: Some(st),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn send_response<W: AsyncWrite + Unpin>(
