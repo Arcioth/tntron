@@ -14,3 +14,8 @@ minecraft-mod/build/
 minecraft-mod/run/
 minecraft-mod/.idea/
 minecraft-mod/*.iml
+android-app/.gradle/
+android-app/build/
+android-app/app/build/
+android-app/local.properties
+android-app/.idea/

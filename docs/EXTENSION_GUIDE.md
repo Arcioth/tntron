@@ -128,6 +128,7 @@ Every Lua extension executes inside its own isolated `mlua` Lua 5.4 VM (`Lua::ne
 | `notify` | `tntron.ui.toast(msg)`, `tntron.notify.desktop(summary, body)` | In-app toast banners and OS desktop notifications |
 | `network` | `tntron.net.fetch_rss()`, `yt_search()`, `yt_play()`, `yt_download()` (also requires `fs:write`) | Async HTTP/RSS/yt-dlp workers |
 | `mc:link` | `tntron.mc.status()`, `tntron.mc.set_config(patch)`, `tntron.mc.send_notice(kind, title, body)` | Localhost Minecraft Fabric 26.2 bridge & game telemetry |
+| `android:link` | `tntron.android.{status,refresh,set_config,bt_connect,bt_disconnect,bt_reverse_audio,bt_discoverable,media,set_sink,bt_volume,bt_mute,switch_source}` | BlueZ AVRCP playback control, Reverse A2DP (Phone -> PC), PipeWire sink switching, and companion app TCP bridge |
 
 ---
 

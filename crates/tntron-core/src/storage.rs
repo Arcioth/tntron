@@ -595,6 +595,28 @@ impl Default for MinecraftLinkConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct AndroidLinkConfig {
+    pub enabled: bool,
+    pub lan_enabled: bool,
+    pub bind_host: String,
+    pub tcp_port: u16,
+    pub auth_token: String,
+}
+
+impl Default for AndroidLinkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            lan_enabled: true,
+            bind_host: "0.0.0.0".to_string(),
+            tcp_port: 26263,
+            auth_token: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LogoConfig {
     pub enabled: bool,
     /// `"themed"` | `"monochrome"` | `"custom_color"` | `"custom_image"`
@@ -791,6 +813,7 @@ pub struct PersistentState {
     pub transparency: TransparencyConfig,
     pub popup_player: PopupPlayerConfig,
     pub minecraft_link: MinecraftLinkConfig,
+    pub android_link: AndroidLinkConfig,
     pub dsp: DspSettings,
     pub speed: f64,
     pub pitch_st: f64,
@@ -821,6 +844,7 @@ impl Default for PersistentState {
             transparency: TransparencyConfig::default(),
             popup_player: PopupPlayerConfig::default(),
             minecraft_link: MinecraftLinkConfig::default(),
+            android_link: AndroidLinkConfig::default(),
             dsp: DspSettings::default(),
             speed: 1.0,
             pitch_st: 0.0,

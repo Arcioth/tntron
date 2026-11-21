@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{error, info};
 
+use crate::android::{spawn_android_worker, AndroidBridgeHandle, AndroidWorkerCmd};
 use crate::audio::{run_mpv_actor, MpvActorEvent, MpvCommand, MpvEvent, MpvSupervisor};
 use crate::clock::{
     AbLoop, AudioPreset, DspSettings, LoopMode, PlayState, PlaybackClock, ShuffleMode, XorShift64,
@@ -24,9 +25,10 @@ use crate::hardware::{
     spawn_hardware_worker, HardwareCmd,
 };
 use crate::ipc::{
-    default_cover_cache_path, encode_base64, run_ipc_server, run_mc_tcp_server, write_status_file,
-    IpcExtensionItem, IpcLibraryData, IpcLibraryFolder, IpcLibraryTrack, IpcQueryKind, IpcResponse,
-    IpcThemeItem, McBridgeHandle, McTelemetry, TntronStatus, BUILTIN_THEME_ITEMS,
+    default_cover_cache_path, encode_base64, run_android_tcp_server, run_ipc_server,
+    run_mc_tcp_server, write_status_file, IpcExtensionItem, IpcLibraryData, IpcLibraryFolder,
+    IpcLibraryTrack, IpcQueryKind, IpcResponse, IpcThemeItem, McBridgeHandle, McTelemetry,
+    TntronStatus, BUILTIN_THEME_ITEMS,
 };
 use crate::library::{
     analyze_stream_progressive, analyze_track_blocking, copy_track_to_folder_in_jail,
@@ -42,7 +44,7 @@ use crate::storage::{
     import_full_tnt_bundle, parse_tnt_share_json, ButtonPackConfig, DiscordRpcConfig,
     IconPackConfig, LayoutConfig, LogoConfig, MinecraftLinkConfig, PersistentState,
     PopupPlayerConfig, ProfileConfig, ProfileTrackStat, ReactiveUiConfig, SpeedPreset, TrackSort,
-    TransparencyConfig,
+    TransparencyConfig, AndroidLinkConfig,
 };
 
 #[derive(Debug, Clone)]
@@ -223,6 +225,17 @@ pub enum CoreCommand {
         detail: Option<String>,
     },
     TranslateLyrics(String),
+    SetAudioSink(String),
+    SwitchAudioSource(String),
+    AndroidMedia {
+        action: String,
+        player_path: Option<String>,
+    },
+    BtConnect(String),
+    BtDisconnect(String),
+    BtReverseAudio(String),
+    BtStreamVolume(u32),
+    BtStreamMute(bool),
     Shutdown,
 }
 
@@ -360,6 +373,7 @@ pub struct CoreState {
     discord_tx: Option<mpsc::Sender<DiscordWorkerMsg>>,
     discord_status: Option<DiscordStatusHandle>,
     pub mc_bridge: McBridgeHandle,
+    pub android_bridge: AndroidBridgeHandle,
     last_mc_ext_dispatch: Option<Instant>,
     pub error_banner: Option<String>,
     next_toast_id: u64,
@@ -392,8 +406,10 @@ impl CoreState {
             .unwrap_or_default();
         let ext_dir = extensions_dir.unwrap_or_else(default_extensions_dir);
         let mc_bridge = McBridgeHandle::new(persisted.minecraft_link.clone());
+        let android_bridge = AndroidBridgeHandle::new(persisted.android_link.clone());
         let mut ext_host = ExtensionHost::new();
         ext_host.set_mc_bridge(mc_bridge.clone());
+        ext_host.set_android_bridge(android_bridge.clone());
 
         let mut state = Self {
             music_root: canonical_root.clone(),
@@ -445,6 +461,7 @@ impl CoreState {
             discord_tx: None,
             discord_status: None,
             mc_bridge,
+            android_bridge,
             last_mc_ext_dispatch: None,
             error_banner: None,
             next_toast_id: 1,
@@ -1368,6 +1385,55 @@ impl CoreState {
                 ExtHostCommand::McSendNotice { kind, title, body } => {
                     self.mc_bridge.push_notice(kind, title, body);
                 }
+                ExtHostCommand::AndroidSetConfig { patch } => {
+                    apply_android_link_patch(&mut self.persisted.android_link, &patch);
+                    self.android_bridge
+                        .update_config(self.persisted.android_link.clone());
+                    self.dirty_persist = true;
+                }
+                ExtHostCommand::AndroidRefresh => {
+                    self.android_bridge.send_cmd(AndroidWorkerCmd::RefreshNow);
+                }
+                ExtHostCommand::AndroidBtConnect { device_path } => {
+                    self.android_bridge
+                        .send_cmd(AndroidWorkerCmd::BtConnect { device_path });
+                }
+                ExtHostCommand::AndroidBtDisconnect { device_path } => {
+                    self.android_bridge
+                        .send_cmd(AndroidWorkerCmd::BtDisconnect { device_path });
+                }
+                ExtHostCommand::AndroidBtReverseAudio { device_path } => {
+                    self.android_bridge
+                        .send_cmd(AndroidWorkerCmd::BtConnectReverseAudio { device_path });
+                }
+                ExtHostCommand::AndroidBtDiscoverable { discoverable } => {
+                    self.android_bridge
+                        .send_cmd(AndroidWorkerCmd::BtSetDiscoverable { discoverable });
+                }
+                ExtHostCommand::AndroidMedia {
+                    media_cmd,
+                    player_path,
+                } => {
+                    self.android_bridge.send_cmd(AndroidWorkerCmd::AvrcpControl {
+                        player_path,
+                        action: media_cmd,
+                    });
+                }
+                ExtHostCommand::AndroidSetSink { sink_name } => {
+                    self.android_bridge
+                        .send_cmd(AndroidWorkerCmd::SetAudioSink { sink_name });
+                }
+                ExtHostCommand::AndroidBtVolume { volume_pct } => {
+                    self.android_bridge
+                        .send_cmd(AndroidWorkerCmd::SetBtStreamVolume { volume_pct });
+                }
+                ExtHostCommand::AndroidBtMute { muted } => {
+                    self.android_bridge
+                        .send_cmd(AndroidWorkerCmd::SetBtStreamMute { muted });
+                }
+                ExtHostCommand::AndroidSwitchSource { source } => {
+                    self.apply_switch_audio_source(&source, fx);
+                }
                 ExtHostCommand::RegisterSidebar { .. }
                 | ExtHostCommand::UnregisterSidebar { .. }
                 | ExtHostCommand::RegisterSettings { .. }
@@ -1535,6 +1601,11 @@ impl CoreState {
         if !has("tntron.minecraft-link") {
             self.persisted.minecraft_link.enabled = false;
             self.mc_bridge.update_config(self.persisted.minecraft_link.clone());
+        }
+        if !has("tntron.android-link") {
+            self.persisted.android_link.enabled = false;
+            self.android_bridge
+                .update_config(self.persisted.android_link.clone());
         }
         if !has("openify.visualizer")
             && !has("openify.better-visualizer")
@@ -3099,6 +3170,42 @@ impl CoreState {
                     }
                 }
             }
+            CoreCommand::SetAudioSink(sink_name) => {
+                self.android_bridge
+                    .send_cmd(AndroidWorkerCmd::SetAudioSink { sink_name });
+            }
+            CoreCommand::SwitchAudioSource(source) => {
+                self.apply_switch_audio_source(&source, &mut fx);
+            }
+            CoreCommand::AndroidMedia {
+                action,
+                player_path,
+            } => {
+                self.android_bridge.send_cmd(AndroidWorkerCmd::AvrcpControl {
+                    player_path,
+                    action,
+                });
+            }
+            CoreCommand::BtConnect(device_path) => {
+                self.android_bridge
+                    .send_cmd(AndroidWorkerCmd::BtConnect { device_path });
+            }
+            CoreCommand::BtDisconnect(device_path) => {
+                self.android_bridge
+                    .send_cmd(AndroidWorkerCmd::BtDisconnect { device_path });
+            }
+            CoreCommand::BtReverseAudio(device_path) => {
+                self.android_bridge
+                    .send_cmd(AndroidWorkerCmd::BtConnectReverseAudio { device_path });
+            }
+            CoreCommand::BtStreamVolume(volume_pct) => {
+                self.android_bridge
+                    .send_cmd(AndroidWorkerCmd::SetBtStreamVolume { volume_pct });
+            }
+            CoreCommand::BtStreamMute(muted) => {
+                self.android_bridge
+                    .send_cmd(AndroidWorkerCmd::SetBtStreamMute { muted });
+            }
             CoreCommand::Shutdown => {
                 self.mark_dirty_and_save();
                 fx.mpv_cmds.push(MpvCommand::Quit);
@@ -3176,7 +3283,6 @@ impl CoreState {
 
                 IpcResponse {
                     ok: true,
-                    error: None,
                     status: Some(TntronStatus::from_state(self)),
                     library: Some(IpcLibraryData {
                         current_dir: self.current_dir.display().to_string(),
@@ -3184,10 +3290,7 @@ impl CoreState {
                         tracks: matched,
                         total_tracks: self.all_library_tracks.len(),
                     }),
-                    themes: None,
-                    extensions: None,
-                    cover_base64: None,
-                    message: None,
+                    ..Default::default()
                 }
             }
             IpcQueryKind::GetThemes => {
@@ -3210,13 +3313,9 @@ impl CoreState {
                 }
                 IpcResponse {
                     ok: true,
-                    error: None,
                     status: Some(TntronStatus::from_state(self)),
-                    library: None,
                     themes: Some(themes),
-                    extensions: None,
-                    cover_base64: None,
-                    message: None,
+                    ..Default::default()
                 }
             }
             IpcQueryKind::GetExtensions => {
@@ -3235,28 +3334,52 @@ impl CoreState {
                     .collect();
                 IpcResponse {
                     ok: true,
-                    error: None,
                     status: Some(TntronStatus::from_state(self)),
-                    library: None,
-                    themes: None,
                     extensions: Some(extensions),
-                    cover_base64: None,
-                    message: None,
+                    ..Default::default()
                 }
             }
             IpcQueryKind::GetCover => {
                 let cover_base64 = self.cover_art.as_ref().map(|bytes| encode_base64(bytes));
                 IpcResponse {
                     ok: true,
-                    error: None,
-                    status: None,
-                    library: None,
-                    themes: None,
-                    extensions: None,
                     cover_base64,
-                    message: None,
+                    ..Default::default()
                 }
             }
+            IpcQueryKind::GetAndroidStatus => IpcResponse {
+                ok: true,
+                status: Some(TntronStatus::from_state(self)),
+                android: Some(self.android_bridge.status_snapshot()),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn apply_switch_audio_source(&mut self, source: &str, fx: &mut CommandEffects) {
+        let to_android = source.eq_ignore_ascii_case("android");
+        if to_android {
+            if self.current_track.is_some() && self.play_state == PlayState::Playing {
+                self.play_state = PlayState::Paused;
+                self.clock.set_playing(false);
+                fx.mpv_cmds.push(MpvCommand::SetPause(true));
+            }
+            self.android_bridge
+                .send_cmd(AndroidWorkerCmd::SetActiveSource {
+                    source: "android".to_string(),
+                });
+            self.push_toast("Audio source switched to Android (Bluetooth)", false);
+        } else {
+            self.android_bridge
+                .send_cmd(AndroidWorkerCmd::SetActiveSource {
+                    source: "pc".to_string(),
+                });
+            if self.current_track.is_some() && self.play_state == PlayState::Paused {
+                self.play_state = PlayState::Playing;
+                self.clock.set_playing(true);
+                fx.mpv_cmds.push(MpvCommand::SetPause(false));
+            }
+            self.push_toast("Audio source switched to PC (tntron)", false);
         }
     }
 
@@ -3792,6 +3915,25 @@ fn apply_minecraft_link_patch(cfg: &mut MinecraftLinkConfig, patch: &serde_json:
                 }
                 if updated.tcp_host.trim().is_empty() {
                     updated.tcp_host = "127.0.0.1".to_string();
+                }
+                *cfg = updated;
+            }
+        }
+    }
+}
+
+fn apply_android_link_patch(cfg: &mut AndroidLinkConfig, patch: &serde_json::Value) {
+    if let Ok(mut base) = serde_json::to_value(&*cfg) {
+        if let (Some(dst), Some(src)) = (base.as_object_mut(), patch.as_object()) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
+            if let Ok(mut updated) = serde_json::from_value::<AndroidLinkConfig>(base) {
+                if updated.tcp_port < 1024 {
+                    updated.tcp_port = 26263;
+                }
+                if updated.bind_host.trim().is_empty() {
+                    updated.bind_host = "0.0.0.0".to_string();
                 }
                 *cfg = updated;
             }
@@ -4351,10 +4493,28 @@ pub async fn run_core_runtime(
         }
     });
 
+    let _android_worker_tx = spawn_android_worker(state.android_bridge.clone());
+
     let bcast_mc = broadcast_tx.clone();
+    let cmd_tx_for_mc = cmd_tx_for_ipc.clone();
+    let status_watch_rx_mc = status_watch_rx.clone();
     let mc_bridge_tcp = state.mc_bridge.clone();
     tokio::spawn(async move {
-        run_mc_tcp_server(cmd_tx_for_ipc, status_watch_rx, bcast_mc, mc_bridge_tcp).await;
+        run_mc_tcp_server(cmd_tx_for_mc, status_watch_rx_mc, bcast_mc, mc_bridge_tcp).await;
+    });
+
+    let bcast_android = broadcast_tx.clone();
+    let mc_bridge_for_android = state.mc_bridge.clone();
+    let android_bridge_tcp = state.android_bridge.clone();
+    tokio::spawn(async move {
+        run_android_tcp_server(
+            cmd_tx_for_ipc,
+            status_watch_rx,
+            bcast_android,
+            mc_bridge_for_android,
+            android_bridge_tcp,
+        )
+        .await;
     });
 
     let _ = ui_tx.send(CoreUpdate::Snapshot(Box::new(state.snapshot()))).await;

@@ -49,6 +49,7 @@ fn ser_to_lua<T: serde::Serialize>(lua: &Lua, val: &T) -> mlua::Result<LuaValue>
     json_to_lua(lua, &jv)
 }
 
+use crate::android::AndroidBridgeHandle;
 use crate::ext_api::{
     ExtHostCommand, ExtLibraryCtx, ExtPlaybackCtx, ExtRegisteredTheme, ExtSettingsPanel,
     ExtSidebarTab, ExtSlotBadge, ExtensionCardInfo, ExtensionManifest, API_VERSION,
@@ -65,6 +66,7 @@ struct LuaBridgeState {
     storage: HashMap<String, serde_json::Value>,
     pending_cmds: Vec<ExtHostCommand>,
     mc_bridge: Option<McBridgeHandle>,
+    android_bridge: Option<AndroidBridgeHandle>,
 }
 
 impl LuaBridgeState {
@@ -105,6 +107,7 @@ pub struct ExtensionHost {
     pub compact_menu: bool,
     compact_menu_owner: Option<String>,
     mc_bridge: Option<McBridgeHandle>,
+    android_bridge: Option<AndroidBridgeHandle>,
 }
 
 impl Default for ExtensionHost {
@@ -125,11 +128,16 @@ impl ExtensionHost {
             compact_menu: false,
             compact_menu_owner: None,
             mc_bridge: None,
+            android_bridge: None,
         }
     }
 
     pub fn set_mc_bridge(&mut self, bridge: McBridgeHandle) {
         self.mc_bridge = Some(bridge);
+    }
+
+    pub fn set_android_bridge(&mut self, bridge: AndroidBridgeHandle) {
+        self.android_bridge = Some(bridge);
     }
 
     pub fn validate_manifest(m: &ExtensionManifest) -> Result<(), String> {
@@ -541,6 +549,7 @@ Place each extension in its own folder inside `~/.config/tntron/extensions/<ext-
             storage: storage_map.get(id).cloned().unwrap_or_default(),
             pending_cmds: Vec::new(),
             mc_bridge: self.mc_bridge.clone(),
+            android_bridge: self.android_bridge.clone(),
         }));
 
         let lua = match create_sandboxed_lua(&self.exts[idx].script_src, &bridge) {
@@ -989,6 +998,21 @@ Place each extension in its own folder inside `~/.config/tntron/extensions/<ext-
                 ExtHostCommand::McSetConfig { .. }
                 | ExtHostCommand::McSendNotice { .. }
                     if perms.contains("mc:link") =>
+                {
+                    runtime_out.push(cmd);
+                }
+                ExtHostCommand::AndroidSetConfig { .. }
+                | ExtHostCommand::AndroidRefresh
+                | ExtHostCommand::AndroidBtConnect { .. }
+                | ExtHostCommand::AndroidBtDisconnect { .. }
+                | ExtHostCommand::AndroidBtReverseAudio { .. }
+                | ExtHostCommand::AndroidBtDiscoverable { .. }
+                | ExtHostCommand::AndroidMedia { .. }
+                | ExtHostCommand::AndroidSetSink { .. }
+                | ExtHostCommand::AndroidBtVolume { .. }
+                | ExtHostCommand::AndroidBtMute { .. }
+                | ExtHostCommand::AndroidSwitchSource { .. }
+                    if perms.contains("android:link") =>
                 {
                     runtime_out.push(cmd);
                 }
@@ -1667,6 +1691,164 @@ fn install_sdk(lua: &Lua, bridge: &SharedBridge) -> mlua::Result<()> {
         )?;
     }
     root.set("mc", mc)?;
+
+    // tntron.android (BlueZ AVRCP + Reverse A2DP + PipeWire Sinks + LAN App Bridge)
+    let android = lua.create_table()?;
+    {
+        let br = Arc::clone(bridge);
+        android.set(
+            "status",
+            lua.create_function(move |lua, ()| {
+                let maybe_handle = {
+                    let b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                    b.require_perm("android:link")?;
+                    b.android_bridge.clone()
+                };
+                if let Some(handle) = maybe_handle {
+                    ser_to_lua(lua, &handle.status_snapshot())
+                } else {
+                    ser_to_lua(lua, &crate::android::AndroidBridgeStatus::default())
+                }
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        android.set(
+            "refresh",
+            lua.create_function(move |_, ()| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                b.require_perm("android:link")?;
+                b.pending_cmds.push(ExtHostCommand::AndroidRefresh);
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        android.set(
+            "set_config",
+            lua.create_function(move |lua, spec: LuaValue| {
+                let patch: serde_json::Value = lua.from_value(spec)?;
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                b.require_perm("android:link")?;
+                b.pending_cmds.push(ExtHostCommand::AndroidSetConfig { patch });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        android.set(
+            "bt_connect",
+            lua.create_function(move |_, device_path: String| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                b.require_perm("android:link")?;
+                b.pending_cmds.push(ExtHostCommand::AndroidBtConnect { device_path });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        android.set(
+            "bt_disconnect",
+            lua.create_function(move |_, device_path: String| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                b.require_perm("android:link")?;
+                b.pending_cmds.push(ExtHostCommand::AndroidBtDisconnect { device_path });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        android.set(
+            "bt_reverse_audio",
+            lua.create_function(move |_, device_path: String| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                b.require_perm("android:link")?;
+                b.pending_cmds.push(ExtHostCommand::AndroidBtReverseAudio { device_path });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        android.set(
+            "bt_discoverable",
+            lua.create_function(move |_, discoverable: bool| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                b.require_perm("android:link")?;
+                b.pending_cmds.push(ExtHostCommand::AndroidBtDiscoverable { discoverable });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        android.set(
+            "media",
+            lua.create_function(move |_, (media_cmd, player_path): (String, Option<String>)| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                b.require_perm("android:link")?;
+                b.pending_cmds.push(ExtHostCommand::AndroidMedia {
+                    media_cmd,
+                    player_path,
+                });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        android.set(
+            "set_sink",
+            lua.create_function(move |_, sink_name: String| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                b.require_perm("android:link")?;
+                b.pending_cmds.push(ExtHostCommand::AndroidSetSink { sink_name });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        android.set(
+            "bt_volume",
+            lua.create_function(move |_, volume_pct: u32| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                b.require_perm("android:link")?;
+                b.pending_cmds.push(ExtHostCommand::AndroidBtVolume { volume_pct });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        android.set(
+            "bt_mute",
+            lua.create_function(move |_, muted: bool| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                b.require_perm("android:link")?;
+                b.pending_cmds.push(ExtHostCommand::AndroidBtMute { muted });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let br = Arc::clone(bridge);
+        android.set(
+            "switch_source",
+            lua.create_function(move |_, source: String| {
+                let mut b = br.lock().map_err(|_| mlua::Error::RuntimeError("lock".into()))?;
+                b.require_perm("android:link")?;
+                b.pending_cmds.push(ExtHostCommand::AndroidSwitchSource { source });
+                Ok(())
+            })?,
+        )?;
+    }
+    root.set("android", android)?;
 
     // tntron.hw (daeboard + daetron integration)
     let hw = lua.create_table()?;
@@ -3335,6 +3517,63 @@ end
         assert!(notice_cmds.iter().any(|(_, c)| matches!(
             c,
             ExtHostCommand::McSendNotice { kind, .. } if kind == "toast"
+        )));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_android_link_extension_controls_and_source_switch() {
+        let dir = std::env::temp_dir().join(format!(
+            "tntron_android_link_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::bundled_extensions::seed_missing_into(&dir);
+
+        let bridge = AndroidBridgeHandle::new(crate::storage::AndroidLinkConfig::default());
+        let mut host = ExtensionHost::new();
+        host.set_android_bridge(bridge);
+        host.discover(&dir);
+
+        let pb = test_pb();
+        let lib = ExtLibraryCtx::default();
+        let storage: HashMap<String, HashMap<String, serde_json::Value>> = HashMap::new();
+
+        let load_cmds = host.enable("tntron.android-link", &pb, &lib, &storage);
+        assert!(load_cmds.iter().any(|(_, c)| matches!(
+            c,
+            ExtHostCommand::AndroidSetConfig { patch }
+                if patch.get("enabled").and_then(|v| v.as_bool()) == Some(true)
+        )));
+
+        let src_cmds = host.dispatch_action(
+            "tntron.android-link",
+            "src:android",
+            serde_json::Value::Bool(true),
+            &pb,
+            &lib,
+            &storage,
+        );
+        assert!(src_cmds.iter().any(|(_, c)| matches!(
+            c,
+            ExtHostCommand::AndroidSwitchSource { source } if source == "android"
+        )));
+
+        let sink_cmds = host.dispatch_action(
+            "tntron.android-link",
+            "sink:bluez_output.test",
+            serde_json::Value::Bool(true),
+            &pb,
+            &lib,
+            &storage,
+        );
+        assert!(sink_cmds.iter().any(|(_, c)| matches!(
+            c,
+            ExtHostCommand::AndroidSetSink { sink_name } if sink_name == "bluez_output.test"
         )));
 
         let _ = std::fs::remove_dir_all(&dir);

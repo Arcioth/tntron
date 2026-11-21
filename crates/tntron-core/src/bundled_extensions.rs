@@ -17,6 +17,7 @@ macro_rules! ext {
 }
 
 pub const BUNDLED_EXTENSIONS: &[BundledExtension] = &[
+    ext!("android-link"),
     ext!("better-extensions"),
     ext!("better-folders"),
     ext!("better-home"),

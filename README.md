@@ -36,6 +36,8 @@
   - Native `F11` fullscreen toggle and terminal popup visualizer (`tntron-ctl`).
 - **Minecraft Fabric 26.2 Mod & `minecraft-link` Extension**:
   - Full in-game Fabric 26.2 control center (`F8` / `/tntron`), real-time 16-band spectrum & cover art HUD (`F10`), synced karaoke lyrics, DSP/EQ/pitch/A-B loop/sleep timer, library & queue browser, theme & extension switcher, beat-reactive effects, auto-mute MC music, and bidirectional game-reactive rules via the bundled [`minecraft-link`](extensions/minecraft-link) extension (`127.0.0.1:26262` TCP + Unix socket IPC). See [`minecraft-mod/README.md`](minecraft-mod/README.md).
+- **Android Companion App & `android-link` Extension**:
+  - Native Android APK ([`android-app/`](android-app/README.md)) for remote playback control, live 16-band spectrum, cover art, lyrics, DSP/EQ, library/queue browsing, PipeWire PC audio output switching, and 1-tap switching between **PC (`tntron`)** and **Android Reverse Bluetooth (A2DP -> PC speakers)** via the bundled [`android-link`](extensions/android-link) extension (BlueZ AVRCP + PipeWire + LAN/USB TCP bridge on port `26263`).
 
 ---
 
