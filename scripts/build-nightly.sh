@@ -111,18 +111,21 @@ if [ -x "$ROOT_DIR/minecraft-mod/gradlew" ] && command -v java >/dev/null 2>&1; 
   fi
 fi
 
-if [ -x "$ROOT_DIR/android-app/gradlew" ] && [ -n "${ANDROID_HOME:-}" ] && [ -d "${ANDROID_HOME}/platforms/android-36" ]; then
-  echo "==> Building Android companion APK..."
-  AAPT2_ARGS=()
-  if [ -x "${ANDROID_HOME}/build-tools/36.0.0/aapt2" ]; then
-    AAPT2_ARGS+=("-Pandroid.aapt2FromMavenOverride=${ANDROID_HOME}/build-tools/36.0.0/aapt2")
-  fi
-  "$ROOT_DIR/android-app/gradlew" -p "$ROOT_DIR/android-app" assembleRelease "${AAPT2_ARGS[@]}" --no-daemon
-  APK_SRC="$(find "$ROOT_DIR/android-app/app/build/outputs/apk/release" -maxdepth 1 -name '*.apk' | head -n1)"
-  if [ -n "$APK_SRC" ]; then
-    APK_DST="$DIST_DIR/tntron-android-remote-1.0.0.apk"
-    cp "$APK_SRC" "$APK_DST"
-    (cd "$DIST_DIR" && sha256sum "$(basename "$APK_DST")" > "$(basename "$APK_DST").sha256")
+if [ -x "$ROOT_DIR/android-app/gradlew" ] && [ -n "${ANDROID_HOME:-}" ] && [ -d "${ANDROID_HOME}/platforms/android-36" ] && command -v java >/dev/null 2>&1; then
+  JAVA_MAJOR="$(java -version 2>&1 | sed -n 's/.*version "\([0-9]*\).*/\1/p' | head -n1)"
+  if [ -n "$JAVA_MAJOR" ] && [ "$JAVA_MAJOR" -ge 17 ] && [ "$JAVA_MAJOR" -le 24 ] 2>/dev/null; then
+    echo "==> Building Android companion APK..."
+    AAPT2_ARGS=()
+    if [ -x "${ANDROID_HOME}/build-tools/36.0.0/aapt2" ]; then
+      AAPT2_ARGS+=("-Pandroid.aapt2FromMavenOverride=${ANDROID_HOME}/build-tools/36.0.0/aapt2")
+    fi
+    "$ROOT_DIR/android-app/gradlew" -p "$ROOT_DIR/android-app" assembleRelease "${AAPT2_ARGS[@]}" --no-daemon
+    APK_SRC="$(find "$ROOT_DIR/android-app/app/build/outputs/apk/release" -maxdepth 1 -name '*.apk' | head -n1)"
+    if [ -n "$APK_SRC" ]; then
+      APK_DST="$DIST_DIR/tntron-android-remote-1.0.0.apk"
+      cp "$APK_SRC" "$APK_DST"
+      (cd "$DIST_DIR" && sha256sum "$(basename "$APK_DST")" > "$(basename "$APK_DST").sha256")
+    fi
   fi
 fi
 
