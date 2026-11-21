@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Tntron" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:windowBackground">@color/tnt_bg</item>
+        <item name="android:statusBarColor">@color/tnt_bg</item>
+        <item name="android:navigationBarColor">@color/tnt_surface</item>
+        <item name="colorPrimary">@color/tnt_accent</item>
+        <item name="colorSecondary">@color/tnt_accent</item>
+        <item name="colorSurface">@color/tnt_surface</item>
+        <item name="android:textColorPrimary">@color/tnt_text</item>
+        <item name="android:textColorSecondary">@color/tnt_muted</item>
+    </style>
+
+    <color name="tnt_bg">#0A0D14</color>
+    <color name="tnt_surface">#111622</color>
+    <color name="tnt_card">#171D2D</color>
+    <color name="tnt_accent">#1DB954</color>
+    <color name="tnt_text">#F8FAFC</color>
+    <color name="tnt_muted">#94A3B8</color>
+</resources>

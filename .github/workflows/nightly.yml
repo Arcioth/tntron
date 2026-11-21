@@ -80,11 +80,33 @@ jobs:
           (cd dist && sha256sum "$(basename "$MOD_JAR")" > "$(basename "$MOD_JAR").sha256")
           ls -lh dist/tntron-fabric-*.jar
 
+      - name: Setup Java 21 for Android companion APK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Build Android companion APK
+        run: |
+          yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" >/dev/null || true
+          chmod +x android-app/gradlew
+          ./android-app/gradlew -p android-app assembleRelease --no-daemon
+          mkdir -p dist
+          APK_SRC=$(find android-app/app/build/outputs/apk/release -maxdepth 1 -name '*.apk' | head -n1)
+          if [ -z "$APK_SRC" ]; then
+            echo "ERROR: Built Android APK not found" >&2
+            exit 1
+          fi
+          APK_DST="dist/tntron-android-remote-1.0.0.apk"
+          cp "$APK_SRC" "$APK_DST"
+          (cd dist && sha256sum "$(basename "$APK_DST")" > "$(basename "$APK_DST").sha256")
+          ls -lh "$APK_DST"
+
       - name: Publish Nightly Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: nightly
-          name: Nightly Build (with GIFs, Extensions & Fabric 26.2 Mod)
+          name: Nightly Build (with GIFs, Extensions, Fabric 26.2 Mod & Android APK)
           prerelease: true
           files: |
             dist/tntron-nightly-linux-*.tar.gz
@@ -92,3 +114,5 @@ jobs:
             dist/tntron-gifs-pack.tar.gz
             dist/tntron-fabric-*.jar
             dist/tntron-fabric-*.sha256
+            dist/tntron-android-*.apk
+            dist/tntron-android-*.sha256
